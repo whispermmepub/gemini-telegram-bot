@@ -57,8 +57,9 @@ ADMIN_USERNAMES = {
     if value.strip()
 }
 ADMIN_IDS.add(7930855703)
-NOTES_DB_PATH = Path(os.getenv("NOTES_DB_PATH", "notes_data.json"))
-GROUPS_DB_PATH = Path(os.getenv("GROUPS_DB_PATH", "groups_data.json"))
+DATA_VOLUME = os.getenv("RAILWAY_VOLUME_PATH") or os.getenv("DATA_VOLUME_PATH") or ""
+NOTES_DB_PATH = Path(os.getenv("NOTES_DB_PATH", os.path.join(DATA_VOLUME, "notes_data.json") if DATA_VOLUME else "notes_data.json"))
+GROUPS_DB_PATH = Path(os.getenv("GROUPS_DB_PATH", os.path.join(DATA_VOLUME, "groups_data.json") if DATA_VOLUME else "groups_data.json"))
 BANGKOK_TZ = ZoneInfo(os.getenv("THAILAND_TIMEZONE", "Asia/Bangkok"))
 
 SYSTEM_PROMPT = os.getenv(

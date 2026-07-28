@@ -77,8 +77,26 @@ DeepSeek ကို သုံးချင်ရင် `DEEPSEEK_API_KEY` နဲ�
 OpenRouter ထက်ပြီးတဲ့ cloud fallback တစ်ခုအဖြစ်လည်း သုံးလို့ရပါတယ်။
 
 နေ့စဉ် `06:30` နဲ့ `21:00` messages တွေက bot register လုပ်ထားတဲ့ group တွေကိုပဲ သွားမယ်။
-Group list ကို `groups_data.json` ထဲမှာထားပြီး persistent storage မရှိရင် redeploy/restart နောက်ပိုင်း ဆုံးနိုင်တယ်။
-အမြဲတမ်းထားချင်ရင် Railway volume attach လုပ်ထားပါ။
+Group list ကို `groups_data.json` (နဲ့ `notes_data.json`) ထဲမှာထားပြီး persistent storage မရှိရင် redeploy/restart နောက်ပိုင်း ဆုံးနိုင်တယ်။
+
+## Railway Volume (persistent data)
+
+group list နဲ့ notes တွေ redeploy ခံနိုင်ရည်ရှိအောင် Railway volume သုံးနိုင်တယ်။
+
+1. Railway dashboard → Service ထဲက Volumes tab ကိုသွားပါ
+2. Volume အသစ်ဆောက်ပါ (ဥပမာ `gemini-bot-data`)
+3. Mount path က `/data` လို့ထားပါ
+4. Volume ကိုသုံးပြီးရင် `RAILWAY_VOLUME_PATH=/data` env var က auto ပါလာမယ်
+5. Bot က auto detect လုပ်ပြီး JSON data files တွေကို volume ထဲမှာသိမ်းမယ်
+
+Data structure:
+```
+/data/
+├── notes_data.json     # /addnote နဲ့ထည့်ထားတဲ့ notes
+└── groups_data.json    # Registered group list
+```
+
+Note: `GROUPS_DB_PATH` / `NOTES_DB_PATH` env var တွေနဲ့ သီးသန့်လမ်းကြောင်းသတ်မှတ်လည်းရပါတယ်။
 
 ## Group usage
 
