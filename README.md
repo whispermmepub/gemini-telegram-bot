@@ -10,6 +10,7 @@ Telegram bot တစ်ခုကို Gemini API နဲ့ ချိတ်ထာ
 - Group ထဲမှာ `@botusername` mention လုပ်ရုံနဲ့ reply ပြန်ပေး
 - Bot ကို group admin ပေးထားပြီး သုံးနိုင်
 - URL ပို့ရင် page ထဲက main article text ကိုဖတ်ပြီး source-based answer ပေး
+- `PROVIDER=auto` နဲ့ Gemini -> OpenRouter free -> Ollama local fallback သုံးနိုင်
 - Railway နဲ့ deploy လုပ်လို့ရ
 
 ## Local setup
@@ -43,12 +44,28 @@ python main.py
 
 - `GEMINI_MODEL` - default `gemini-3.6-flash`
 - `SYSTEM_PROMPT` - bot ရဲ့ style ပြောင်းချင်ရင်
+- `PROVIDER` - default `auto`
+- `PROVIDER_ORDER` - default `gemini,openrouter_free,ollama`
+- `OPENROUTER_API_KEY`
+- `OPENROUTER_MODEL` - default `openrouter/free`
+- `OPENROUTER_REFERER`
+- `OPENROUTER_TITLE`
+- `OLLAMA_BASE_URL` - default `http://localhost:11434`
+- `OLLAMA_MODEL` - default `llama3.1:8b`
 - `NOTES_DB_PATH` - default `notes_data.json`
 
 ## Railway notes
 
 ဒီ project က webhook မသုံးဘဲ long polling နဲ့ run လုပ်ထားပါတယ်။
 Railway မှာ Dockerfile ကို auto-detect လုပ်ပြီး container အနေနဲ့ run လုပ်နိုင်ပါတယ်။
+
+`Ollama` ကို local machine ပေါ်ကနေ fallback အဖြစ်သုံးချင်ရင် bot run နေတဲ့ host ကနေ reach လုပ်လို့ရတဲ့ `OLLAMA_BASE_URL` တစ်ခုလိုတယ်။
+Railway ပေါ်က bot က သင့် laptop ရဲ့ localhost ကို တိုက်ရိုက် မမြင်နိုင်ပါဘူး။
+အဲဒါကြောင့် local Ollama fallback ကို သုံးချင်ရင်:
+
+- bot ကိုလည်း local run လုပ်
+- သို့မဟုတ် Ollama ရှိတဲ့ VPS/LAN endpoint တစ်ခုအသုံးပြု
+- သို့မဟုတ် Ollama ကို public reachable tunnel နဲ့ expose လုပ်
 
 ## Group usage
 
@@ -96,7 +113,7 @@ Admin-only commands:
 ## How it works
 
 - Telegram message လက်ခံ
-- Gemini `interactions.create(...)` ကိုခေါ်
+- Provider chain ထဲက model ကိုခေါ်
 - ရလာတဲ့ response ကို Telegram message အဖြစ်ပြန်ပို့
 
 ## Customize

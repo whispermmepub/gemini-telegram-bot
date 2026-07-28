@@ -29,6 +29,18 @@ logger = logging.getLogger("gemini-telegram-bot")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip()
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free").strip()
+OPENROUTER_REFERER = os.getenv("OPENROUTER_REFERER", "").strip()
+OPENROUTER_TITLE = os.getenv("OPENROUTER_TITLE", "Gemini Telegram Bot").strip()
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b").strip()
+PROVIDER = os.getenv("PROVIDER", "auto").strip().lower()
+PROVIDER_ORDER = [
+    item.strip().lower()
+    for item in os.getenv("PROVIDER_ORDER", "gemini,openrouter_free,ollama").split(",")
+    if item.strip()
+]
 ADMIN_IDS = {
     int(value)
     for value in re.split(r"[,\s]+", os.getenv("ADMIN_IDS", "").strip())
@@ -48,10 +60,12 @@ SYSTEM_PROMPT = os.getenv(
 
 MAX_TELEGRAM_MESSAGE = 4096
 BOT_USERNAME = ""
-user_sessions: Dict[str, str] = {}
+conversation_store: Dict[str, list[dict]] = {}
 notes_store: list[dict] = []
 MAX_SOURCE_CHARS = 12000
 MAX_NOTE_SOURCE_CHARS = 18000
+MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "8"))
+MAX_STORED_MESSAGE_CHARS = int(os.getenv("MAX_STORED_MESSAGE_CHARS", "1200"))
 URL_RE = re.compile(r"https?://[^\s<>\]\)\"']+")
 SOURCE_SYSTEM_PROMPT = (
     "You answer using only the provided webpage source text. "
@@ -526,6 +540,137 @@ def _session_key(chat_id: int, user_id: int) -> str:
     return f"{chat_id}:{user_id}"
 
 
+def _normalize_provider_name(provider: str) -> str:
+    value = provider.strip().lower().replace("-", "_")
+    if value in {"openrouter", "openrouter_free", "openrouter/free"}:
+        return "openrouter_free"
+    if value in {"ollama", "local", "local_ollama"}:
+        return "ollama"
+    if value in {"gemini", "google"}:
+        return "gemini"
+    return value
+
+
+def _provider_chain() -> list[str]:
+    if PROVIDER != "auto":
+        return [_normalize_provider_name(PROVIDER)]
+
+    chain: list[str] = []
+    for item in PROVIDER_ORDER:
+        provider = _normalize_provider_name(item)
+        if provider not in chain:
+            chain.append(provider)
+    return chain or ["gemini", "openrouter_free", "ollama"]
+
+
+def _append_history(session_key: str, user_text: str, assistant_text: str) -> None:
+    history = conversation_store.setdefault(session_key, [])
+    history.append({"role": "user", "content": _truncate_text(user_text, MAX_STORED_MESSAGE_CHARS)})
+    history.append({"role": "assistant", "content": _truncate_text(assistant_text, MAX_STORED_MESSAGE_CHARS)})
+    conversation_store[session_key] = history[-(MAX_HISTORY_MESSAGES * 2):]
+
+
+def _build_dialogue_prompt(session_key: str, prompt: str) -> str:
+    history = conversation_store.get(session_key, [])[-(MAX_HISTORY_MESSAGES * 2):]
+    if not history:
+        return prompt
+
+    lines = ["Conversation history:"]
+    for message in history:
+        role = "User" if message.get("role") == "user" else "Assistant"
+        content = str(message.get("content", "")).strip()
+        if content:
+            lines.append(f"{role}: {content}")
+    lines.append(f"User: {prompt.strip()}")
+    lines.append("Assistant: answer the latest user message only.")
+    return "\n\n".join(lines)
+
+
+def _extract_openrouter_content(payload: dict) -> str:
+    choices = payload.get("choices") or []
+    if not choices:
+        return ""
+    message = choices[0].get("message") or {}
+    content = message.get("content", "")
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                part = item.get("text") or item.get("content") or ""
+                if part:
+                    parts.append(str(part))
+            elif item:
+                parts.append(str(item))
+        return "".join(parts).strip()
+    return str(content).strip()
+
+
+def _extract_ollama_content(payload: dict) -> str:
+    message = payload.get("message") or {}
+    content = message.get("content")
+    if content:
+        return str(content).strip()
+    if payload.get("response"):
+        return str(payload["response"]).strip()
+    return ""
+
+
+def _post_json(url: str, payload: dict, headers: Optional[dict] = None, timeout: int = 60) -> dict:
+    request = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers or {},
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout) as response:
+        raw = response.read().decode(response.headers.get_content_charset() or "utf-8", errors="replace")
+        return json.loads(raw) if raw else {}
+
+
+def _call_gemini_sync(client: genai.Client, system_prompt: str, prompt: str) -> str:
+    interaction = client.interactions.create(
+        model=GEMINI_MODEL,
+        input=prompt,
+        system_instruction=system_prompt,
+    )
+    return (interaction.output_text or "").strip()
+
+
+def _call_openrouter_sync(system_prompt: str, prompt: str) -> str:
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError("OPENROUTER_API_KEY not set")
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    if OPENROUTER_REFERER:
+        headers["HTTP-Referer"] = OPENROUTER_REFERER
+    if OPENROUTER_TITLE:
+        headers["X-OpenRouter-Title"] = OPENROUTER_TITLE
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+    }
+    data = _post_json("https://openrouter.ai/api/v1/chat/completions", payload, headers=headers)
+    return _extract_openrouter_content(data)
+
+
+def _call_ollama_sync(system_prompt: str, prompt: str) -> str:
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False,
+    }
+    data = _post_json(f"{OLLAMA_BASE_URL}/api/chat", payload, headers={"Content-Type": "application/json"})
+    return _extract_ollama_content(data)
+
+
 def _is_group_chat(update: Update) -> bool:
     chat = update.effective_chat
     return bool(chat and chat.type in {"group", "supergroup"})
@@ -557,24 +702,40 @@ def _match_faq(prompt: str) -> Optional[str]:
 
 
 def _generate_reply_sync(
-    client: genai.Client,
+    client: Optional[genai.Client],
     session_key: str,
     prompt: str,
     system_prompt: str = SYSTEM_PROMPT,
     remember_history: bool = True,
 ) -> tuple[str, Optional[str]]:
-    previous_id = user_sessions.get(session_key) if remember_history else None
-    kwargs = {
-        "model": GEMINI_MODEL,
-        "input": prompt,
-        "system_instruction": system_prompt,
-    }
-    if previous_id:
-        kwargs["previous_interaction_id"] = previous_id
+    prompt_to_send = _build_dialogue_prompt(session_key, prompt) if remember_history else prompt
+    last_error: Optional[Exception] = None
+    chain = _provider_chain()
 
-    interaction = client.interactions.create(**kwargs)
-    reply = (interaction.output_text or "").strip()
-    return reply, interaction.id
+    for provider in chain:
+        try:
+            if provider == "gemini":
+                if not client:
+                    raise RuntimeError("Gemini client not initialized")
+                reply = _call_gemini_sync(client, system_prompt, prompt_to_send)
+            elif provider == "openrouter_free":
+                reply = _call_openrouter_sync(system_prompt, prompt_to_send)
+            elif provider == "ollama":
+                reply = _call_ollama_sync(system_prompt, prompt_to_send)
+            else:
+                raise RuntimeError(f"Unknown provider: {provider}")
+
+            reply = (reply or "").strip()
+            if reply:
+                return reply, provider
+            raise RuntimeError(f"{provider} returned an empty response")
+        except Exception as exc:
+            last_error = exc
+            logger.warning("Provider %s failed: %s", provider, exc)
+
+    if last_error:
+        raise last_error
+    return "", None
 
 
 async def _send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
@@ -603,7 +764,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     user = update.effective_user
     if user:
-        user_sessions.pop(user.id, None)
+        conversation_store.pop(_session_key(update.effective_chat.id, user.id), None)
     await update.message.reply_text("Conversation reset ပြီးပါပြီ။")
 
 
@@ -692,6 +853,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     faq_reply = _match_faq(prompt)
     if faq_reply:
         await _send_reply(update, context, faq_reply)
+        _append_history(_session_key(update.effective_chat.id, user.id), prompt, faq_reply)
         return
 
     urls = _extract_urls(prompt)
@@ -721,6 +883,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 reply = "ဒီ page ထဲက data ပေါ်မူတည်ပြီး answer မထုတ်နိုင်ခဲ့ပါ။"
             header = f"Source: {final_url}"
             await _send_reply(update, context, f"{header}\n\n{reply}")
+            _append_history(_session_key(update.effective_chat.id, user.id), prompt, reply)
         except (HTTPError, URLError, ValueError) as exc:
             logger.warning("URL fetch failed for %s: %s", url, exc)
             await update.message.reply_text(f"URL ဖတ်မရပါ: {exc}")
@@ -750,6 +913,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if urls:
                 prefix += "\n" + "\n".join(f"- {url}" for url in urls[:3])
             await _send_reply(update, context, f"{prefix}\n\n{reply}")
+            _append_history(_session_key(update.effective_chat.id, user.id), prompt, reply)
             return
         except Exception as exc:
             logger.exception("Note answer failed")
@@ -763,12 +927,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     client: genai.Client = context.application.bot_data["genai_client"]
 
     try:
-        reply, interaction_id = await asyncio.to_thread(_generate_reply_sync, client, session_key, prompt)
-        if interaction_id:
-            user_sessions[session_key] = interaction_id
+        reply, _provider = await asyncio.to_thread(_generate_reply_sync, client, session_key, prompt)
         if not reply:
             reply = "Gemini က response မပေးနိုင်ခဲ့ပါ။ နောက်တစ်ခါ ပြန်စမ်းပါ။"
         await _send_reply(update, context, reply)
+        _append_history(session_key, prompt, reply)
     except Exception as exc:
         logger.exception("Gemini request failed")
         await update.message.reply_text(_friendly_model_error(exc))
