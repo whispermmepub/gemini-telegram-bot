@@ -1,9 +1,14 @@
 import asyncio
+from html import unescape
 import logging
 import os
 import re
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 from typing import Dict, Optional
 
+from bs4 import BeautifulSoup
 from google import genai
 from telegram import BotCommand, Update
 from telegram.constants import ChatAction
@@ -34,6 +39,78 @@ SYSTEM_PROMPT = os.getenv(
 MAX_TELEGRAM_MESSAGE = 4096
 BOT_USERNAME = ""
 user_sessions: Dict[str, str] = {}
+MAX_SOURCE_CHARS = 12000
+URL_RE = re.compile(r"https?://[^\s<>\]\)\"']+")
+SOURCE_SYSTEM_PROMPT = (
+    "You answer using only the provided webpage source text. "
+    "If the source does not contain the answer, say so clearly. "
+    "Do not invent facts. "
+    "If the user did not ask a specific question, give a concise summary of the page. "
+    "Reply in the same language as the user."
+)
+
+FAQ_RESPONSES = [
+    (
+        ("cantook",),
+        (
+            "Android မှာ EPUB ဖတ်ချင်ရင် `Cantook` app သို့မဟုတ် `Google Play Books` app သုံးလို့ရပါတယ်.\n\n"
+            "Cantook app:\n"
+            "https://play.google.com/store/apps/details?id=com.aldiko.android\n\n"
+            "ပြီးရင် https://t.me/TheBookR ချန်နယ်ထဲက `epub` လို့ရေးထားတဲ့ဖိုင်ကိုဖွင့်ပြီး Cantook app ကိုရွေးဖွင့်လိုက်ပါ.\n\n"
+            "Google Play Books app:\n"
+            "https://play.google.com/store/apps/details?id=com.google.android.apps.books\n\n"
+            "Play Books app နဲ့လည်း ဒီတိုင်းဖတ်လို့ရပါတယ်."
+        ),
+    ),
+    (
+        ("google play book",),
+        (
+            "Android မှာ EPUB ဖတ်ချင်ရင် `Cantook` app သို့မဟုတ် `Google Play Books` app သုံးလို့ရပါတယ်.\n\n"
+            "Cantook app:\n"
+            "https://play.google.com/store/apps/details?id=com.aldiko.android\n\n"
+            "ပြီးရင် https://t.me/TheBookR ချန်နယ်ထဲက `epub` လို့ရေးထားတဲ့ဖိုင်ကိုဖွင့်ပြီး Cantook app ကိုရွေးဖွင့်လိုက်ပါ.\n\n"
+            "Google Play Books app:\n"
+            "https://play.google.com/store/apps/details?id=com.google.android.apps.books\n\n"
+            "Play Books app နဲ့လည်း ဒီတိုင်းဖတ်လို့ရပါတယ်."
+        ),
+    ),
+    (
+        ("google play books",),
+        (
+            "Android မှာ EPUB ဖတ်ချင်ရင် `Cantook` app သို့မဟုတ် `Google Play Books` app သုံးလို့ရပါတယ်.\n\n"
+            "Cantook app:\n"
+            "https://play.google.com/store/apps/details?id=com.aldiko.android\n\n"
+            "ပြီးရင် https://t.me/TheBookR ချန်နယ်ထဲက `epub` လို့ရေးထားတဲ့ဖိုင်ကိုဖွင့်ပြီး Cantook app ကိုရွေးဖွင့်လိုက်ပါ.\n\n"
+            "Google Play Books app:\n"
+            "https://play.google.com/store/apps/details?id=com.google.android.apps.books\n\n"
+            "Play Books app နဲ့လည်း ဒီတိုင်းဖတ်လို့ရပါတယ်."
+        ),
+    ),
+    (
+        ("android", "epub"),
+        (
+            "Android မှာ EPUB ဖတ်ချင်ရင် `Cantook` app သို့မဟုတ် `Google Play Books` app သုံးလို့ရပါတယ်.\n\n"
+            "Cantook app:\n"
+            "https://play.google.com/store/apps/details?id=com.aldiko.android\n\n"
+            "ပြီးရင် https://t.me/TheBookR ချန်နယ်ထဲက `epub` လို့ရေးထားတဲ့ဖိုင်ကိုဖွင့်ပြီး Cantook app ကိုရွေးဖွင့်လိုက်ပါ.\n\n"
+            "Google Play Books app:\n"
+            "https://play.google.com/store/apps/details?id=com.google.android.apps.books\n\n"
+            "Play Books app နဲ့လည်း ဒီတိုင်းဖတ်လို့ရပါတယ်."
+        ),
+    ),
+    (
+        ("epub", "ဖတ်"),
+        (
+            "Android မှာ EPUB ဖတ်ချင်ရင် `Cantook` app သို့မဟုတ် `Google Play Books` app သုံးလို့ရပါတယ်.\n\n"
+            "Cantook app:\n"
+            "https://play.google.com/store/apps/details?id=com.aldiko.android\n\n"
+            "ပြီးရင် https://t.me/TheBookR ချန်နယ်ထဲက `epub` လို့ရေးထားတဲ့ဖိုင်ကိုဖွင့်ပြီး Cantook app ကိုရွေးဖွင့်လိုက်ပါ.\n\n"
+            "Google Play Books app:\n"
+            "https://play.google.com/store/apps/details?id=com.google.android.apps.books\n\n"
+            "Play Books app နဲ့လည်း ဒီတိုင်းဖတ်လို့ရပါတယ်."
+        ),
+    ),
+]
 
 
 def _require_env() -> None:
@@ -64,6 +141,127 @@ def _chunk_text(text: str, limit: int = MAX_TELEGRAM_MESSAGE) -> list[str]:
     return [chunk for chunk in chunks if chunk]
 
 
+def _normalize_text(text: str) -> str:
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    return "\n".join(lines)
+
+
+def _clean_url(url: str) -> str:
+    return url.rstrip(".,!?;:)]}\"'")
+
+
+def _extract_urls(text: str) -> list[str]:
+    urls = []
+    for match in URL_RE.finditer(text):
+        url = _clean_url(match.group(0))
+        parsed = urlparse(url)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            urls.append(url)
+    return urls
+
+
+def _remove_urls(text: str, urls: list[str]) -> str:
+    result = text
+    for url in urls:
+        result = result.replace(url, " ")
+    return re.sub(r"\s+", " ", result).strip()
+
+
+def _fetch_url_html(url: str) -> tuple[str, str, str]:
+    request = Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/126.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+    )
+    with urlopen(request, timeout=20) as response:
+        content_type = response.headers.get_content_type()
+        if content_type not in {"text/html", "application/xhtml+xml"}:
+            raise ValueError(f"Unsupported content type: {content_type}")
+        charset = response.headers.get_content_charset() or "utf-8"
+        raw = response.read(2_000_000)
+        html = raw.decode(charset, errors="replace")
+        return html, response.geturl(), response.headers.get("content-type", "")
+
+
+def _extract_main_text_from_html(html: str) -> tuple[str, str, str]:
+    soup = BeautifulSoup(html, "html.parser")
+
+    for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "aside", "form", "svg", "canvas"]):
+        tag.decompose()
+
+    title = ""
+    og_title = soup.find("meta", attrs={"property": "og:title"})
+    if og_title and og_title.get("content"):
+        title = og_title["content"].strip()
+    if not title and soup.title and soup.title.string:
+        title = soup.title.string.strip()
+
+    description = ""
+    meta_desc = soup.find("meta", attrs={"name": "description"})
+    if meta_desc and meta_desc.get("content"):
+        description = meta_desc["content"].strip()
+
+    selectors = [
+        "article",
+        "main",
+        "[role=main]",
+        ".post-content",
+        ".entry-content",
+        ".article-content",
+        ".content",
+        ".post",
+        ".article",
+    ]
+
+    candidates = [node for selector in selectors for node in soup.select(selector)]
+    if not candidates:
+        body = soup.body or soup
+        candidates = [body]
+
+    def candidate_score(node) -> tuple[int, str]:
+        text = node.get_text("\n", strip=True)
+        normalized = _normalize_text(unescape(text))
+        return len(normalized), normalized
+
+    scored = [candidate_score(node) for node in candidates]
+    scored.sort(key=lambda item: item[0], reverse=True)
+    main_text = scored[0][1] if scored else ""
+
+    if not main_text:
+        main_text = _normalize_text(unescape((soup.body or soup).get_text("\n", strip=True)))
+
+    return title, description, main_text
+
+
+def _summarize_source_text(text: str, limit: int = MAX_SOURCE_CHARS) -> str:
+    cleaned = _normalize_text(text)
+    if len(cleaned) <= limit:
+        return cleaned
+    cut = cleaned[:limit]
+    split_at = cut.rfind("\n")
+    if split_at > 1000:
+        cut = cut[:split_at]
+    return cut.strip()
+
+
+def _build_source_prompt(user_prompt: str, url: str, title: str, description: str, source_text: str) -> str:
+    question = user_prompt.strip() or "Summarize this page and give the main points."
+    return (
+        f"Page URL: {url}\n"
+        f"Page title: {title or 'Unknown'}\n"
+        f"Page description: {description or 'Not provided'}\n\n"
+        f"Source text:\n{source_text}\n\n"
+        f"User question:\n{question}"
+    )
+
+
 def _build_client() -> genai.Client:
     return genai.Client(api_key=GEMINI_API_KEY)
 
@@ -88,12 +286,26 @@ def _extract_group_prompt(text: str) -> Optional[str]:
     return cleaned or None
 
 
-def _generate_reply_sync(client: genai.Client, session_key: str, prompt: str) -> tuple[str, Optional[str]]:
-    previous_id = user_sessions.get(session_key)
+def _match_faq(prompt: str) -> Optional[str]:
+    lowered = prompt.lower()
+    for keywords, response in FAQ_RESPONSES:
+        if all(keyword in lowered for keyword in keywords):
+            return response
+    return None
+
+
+def _generate_reply_sync(
+    client: genai.Client,
+    session_key: str,
+    prompt: str,
+    system_prompt: str = SYSTEM_PROMPT,
+    remember_history: bool = True,
+) -> tuple[str, Optional[str]]:
+    previous_id = user_sessions.get(session_key) if remember_history else None
     kwargs = {
         "model": GEMINI_MODEL,
         "input": prompt,
-        "system_instruction": SYSTEM_PROMPT,
+        "system_instruction": system_prompt,
     }
     if previous_id:
         kwargs["previous_interaction_id"] = previous_id
@@ -150,6 +362,46 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         prompt = _extract_group_prompt(prompt) or (prompt if replied_to_bot else None)
         if not prompt:
             return
+
+    faq_reply = _match_faq(prompt)
+    if faq_reply:
+        await _send_reply(update, context, faq_reply)
+        return
+
+    urls = _extract_urls(prompt)
+    if urls:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+        url = urls[0]
+        question = _remove_urls(prompt, urls)
+        client: genai.Client = context.application.bot_data["genai_client"]
+        try:
+            html, final_url, content_type = await asyncio.to_thread(_fetch_url_html, url)
+            title, description, source_text = await asyncio.to_thread(_extract_main_text_from_html, html)
+            source_text = _summarize_source_text(source_text)
+            if not source_text:
+                await update.message.reply_text("ဒီ URL ကနေ ဖတ်လို့ရတဲ့ အကြောင်းအရာ မတွေ့ပါဘူး။")
+                return
+
+            source_prompt = _build_source_prompt(question, final_url, title, description, source_text)
+            reply, _ = await asyncio.to_thread(
+                _generate_reply_sync,
+                client,
+                _session_key(update.effective_chat.id, user.id),
+                source_prompt,
+                SOURCE_SYSTEM_PROMPT,
+                False,
+            )
+            if not reply:
+                reply = "ဒီ page ထဲက data ပေါ်မူတည်ပြီး answer မထုတ်နိုင်ခဲ့ပါ။"
+            header = f"Source: {final_url}"
+            await _send_reply(update, context, f"{header}\n\n{reply}")
+        except (HTTPError, URLError, ValueError) as exc:
+            logger.warning("URL fetch failed for %s: %s", url, exc)
+            await update.message.reply_text(f"URL ဖတ်မရပါ: {exc}")
+        except Exception as exc:
+            logger.exception("URL processing failed")
+            await update.message.reply_text(f"URL processing error: {exc}")
+        return
 
     session_key = _session_key(update.effective_chat.id, user.id)
 

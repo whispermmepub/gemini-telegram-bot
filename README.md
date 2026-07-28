@@ -9,6 +9,7 @@ Telegram bot တစ်ခုကို Gemini API နဲ့ ချိတ်ထာ
 - ပုံမှန် text message တွေကို Gemini ဆီပို့ပြီး reply ပြန်ပေး
 - Group ထဲမှာ `@botusername` mention လုပ်ရုံနဲ့ reply ပြန်ပေး
 - Bot ကို group admin ပေးထားပြီး သုံးနိုင်
+- URL ပို့ရင် page ထဲက main article text ကိုဖတ်ပြီး source-based answer ပေး
 - Railway နဲ့ deploy လုပ်လို့ရ
 
 ## Local setup
@@ -54,6 +55,24 @@ Railway မှာ Dockerfile ကို auto-detect လုပ်ပြီး cont
 3. Group ထဲမှာ `@your_bot_username` လို့ mention လုပ်ပြီး message ရေးပါ
 4. Bot က mention ပါတဲ့ message ကိုပဲ Gemini ဆီပို့ပြီး reply ပြန်ပေးပါမယ်
 5. Reply-to-bot message တွေလည်း အလုပ်လုပ်ပါမယ်
+
+## URL reading
+
+Bot ကို URL ပို့လိုက်ရင် page ကို fetch လုပ်မယ်, HTML ထဲက main article text ကို extract လုပ်မယ်, ပြီးရင် အဲဒီ source text ပေါ်မှာပဲ Gemini နဲ့ အဖြေထုတ်မယ်။
+
+အလုပ်လုပ်ပုံ:
+
+1. User က `https://...` URL ပို့
+2. Bot က page ကို fetch လုပ်
+3. Main article text ကို extract လုပ်
+4. User က မေးထားတဲ့မေးခွန်းရှိရင် အဲဒါကို source-based answer ပြန်ပေး
+5. Question မပါတဲ့ URL ဆိုရင် page summary ပြန်ပေး
+
+သတိထားရန်:
+
+- Public webpage တွေမှာအကောင်းဆုံးအလုပ်လုပ်တယ်
+- Login လိုတဲ့ page, paywall, JavaScript-heavy site တွေမှာ extract မကောင်းနိုင်
+- ဖတ်မရရင် error ပြန်ပြမယ်
 
 ## How it works
 
