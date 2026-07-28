@@ -33,12 +33,15 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free").strip()
 OPENROUTER_REFERER = os.getenv("OPENROUTER_REFERER", "").strip()
 OPENROUTER_TITLE = os.getenv("OPENROUTER_TITLE", "Gemini Telegram Bot").strip()
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip()
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b").strip()
 PROVIDER = os.getenv("PROVIDER", "auto").strip().lower()
 PROVIDER_ORDER = [
     item.strip().lower()
-    for item in os.getenv("PROVIDER_ORDER", "gemini,openrouter_free,ollama").split(",")
+    for item in os.getenv("PROVIDER_ORDER", "gemini,openrouter_free,deepseek,ollama").split(",")
     if item.strip()
 ]
 ADMIN_IDS = {
@@ -544,6 +547,8 @@ def _normalize_provider_name(provider: str) -> str:
     value = provider.strip().lower().replace("-", "_")
     if value in {"openrouter", "openrouter_free", "openrouter/free"}:
         return "openrouter_free"
+    if value in {"deepseek", "deepseek_api"}:
+        return "deepseek"
     if value in {"ollama", "local", "local_ollama"}:
         return "ollama"
     if value in {"gemini", "google"}:
@@ -658,6 +663,25 @@ def _call_openrouter_sync(system_prompt: str, prompt: str) -> str:
     return _extract_openrouter_content(data)
 
 
+def _call_deepseek_sync(system_prompt: str, prompt: str) -> str:
+    if not DEEPSEEK_API_KEY:
+        raise RuntimeError("DEEPSEEK_API_KEY not set")
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False,
+    }
+    data = _post_json(f"{DEEPSEEK_BASE_URL}/chat/completions", payload, headers=headers)
+    return _extract_openrouter_content(data)
+
+
 def _call_ollama_sync(system_prompt: str, prompt: str) -> str:
     payload = {
         "model": OLLAMA_MODEL,
@@ -720,6 +744,8 @@ def _generate_reply_sync(
                 reply = _call_gemini_sync(client, system_prompt, prompt_to_send)
             elif provider == "openrouter_free":
                 reply = _call_openrouter_sync(system_prompt, prompt_to_send)
+            elif provider == "deepseek":
+                reply = _call_deepseek_sync(system_prompt, prompt_to_send)
             elif provider == "ollama":
                 reply = _call_ollama_sync(system_prompt, prompt_to_send)
             else:

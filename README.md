@@ -10,7 +10,7 @@ Telegram bot တစ်ခုကို Gemini API နဲ့ ချိတ်ထာ
 - Group ထဲမှာ `@botusername` mention လုပ်ရုံနဲ့ reply ပြန်ပေး
 - Bot ကို group admin ပေးထားပြီး သုံးနိုင်
 - URL ပို့ရင် page ထဲက main article text ကိုဖတ်ပြီး source-based answer ပေး
-- `PROVIDER=auto` နဲ့ Gemini -> OpenRouter free -> Ollama local fallback သုံးနိုင်
+- `PROVIDER=auto` နဲ့ Gemini -> OpenRouter free -> DeepSeek -> Ollama local fallback သုံးနိုင်
 - Railway နဲ့ deploy လုပ်လို့ရ
 
 ## Local setup
@@ -45,11 +45,14 @@ python main.py
 - `GEMINI_MODEL` - default `gemini-3.6-flash`
 - `SYSTEM_PROMPT` - bot ရဲ့ style ပြောင်းချင်ရင်
 - `PROVIDER` - default `auto`
-- `PROVIDER_ORDER` - default `gemini,openrouter_free,ollama`
+- `PROVIDER_ORDER` - default `gemini,openrouter_free,deepseek,ollama`
 - `OPENROUTER_API_KEY`
 - `OPENROUTER_MODEL` - default `openrouter/free`
 - `OPENROUTER_REFERER`
 - `OPENROUTER_TITLE`
+- `DEEPSEEK_API_KEY`
+- `DEEPSEEK_MODEL` - default `deepseek-chat`
+- `DEEPSEEK_BASE_URL` - default `https://api.deepseek.com`
 - `OLLAMA_BASE_URL` - default `http://localhost:11434`
 - `OLLAMA_MODEL` - default `llama3.1:8b`
 - `NOTES_DB_PATH` - default `notes_data.json`
@@ -66,6 +69,9 @@ Railway ပေါ်က bot က သင့် laptop ရဲ့ localhost ကိ�
 - bot ကိုလည်း local run လုပ်
 - သို့မဟုတ် Ollama ရှိတဲ့ VPS/LAN endpoint တစ်ခုအသုံးပြု
 - သို့မဟုတ် Ollama ကို public reachable tunnel နဲ့ expose လုပ်
+
+DeepSeek ကို သုံးချင်ရင် `DEEPSEEK_API_KEY` နဲ့ `DEEPSEEK_MODEL` ကို variables ထဲထည့်ပါ။
+OpenRouter ထက်ပြီးတဲ့ cloud fallback တစ်ခုအဖြစ်လည်း သုံးလို့ရပါတယ်။
 
 ## Group usage
 
