@@ -960,9 +960,13 @@ def _generate_reply_sync(
 async def _send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     if not update.message:
         return
+    is_group = _is_group_chat(update)
     for part in _chunk_text(text):
+        formatted = _format_telegram_html(part)
+        if is_group:
+            formatted = f"<blockquote>{formatted}</blockquote>"
         await update.message.reply_text(
-            _format_telegram_html(part),
+            formatted,
             parse_mode="HTML",
             disable_web_page_preview=False,
         )
