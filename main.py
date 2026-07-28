@@ -635,9 +635,17 @@ def _parse_note_addition(text: str) -> dict:
     urls = _extract_urls(joined_content or body)
 
     if urls:
-        if not title:
+        has_pipe = "|" in body
+        if has_pipe:
+            title = parts[0]
+        else:
             cleaned = _remove_urls(body, urls)
-            title = cleaned.split("|", 1)[0].strip()
+            title = cleaned.strip()
+            if not title:
+                parsed = urlparse(urls[0])
+                domain = parsed.netloc.replace("www.", "")
+                path = parsed.path.strip("/").replace("/", " - ").replace("-", " ").replace("_", " ")
+                title = f"{domain} - {path}" if path else domain
         tags = _split_list_field(content_parts[-1]) if len(content_parts) >= 2 and not _extract_urls(content_parts[-1]) else []
         return {
             "kind": "source",
@@ -1043,7 +1051,8 @@ async def addnote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     except Exception as exc:
         logger.exception("Failed to add note")
-        await update.message.reply_text(f"Note ထည့်မရပါ: {exc}")
+        msg = f"Note သိမ်းလို့မရပါ။\n{_friendly_model_error(exc)}"
+        await update.message.reply_text(msg)
 
 
 async def notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1060,6 +1069,31 @@ async def notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     for idx, note in enumerate(notes_store[:20], start=1):
         lines.append(f"{idx}. {note.get('title', 'Untitled')} [{note.get('kind', 'source')}] ({len(note.get('urls', []))} URLs)")
     await update.message.reply_text("\n".join(lines))
+
+
+async def delnote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not _is_admin(update):
+        await update.message.reply_text("ဒီ command ကို admin ပဲ သုံးလို့ရပါတယ်။")
+        return
+
+    body = re.sub(r"^/delnote(?:@\w+)?\s*", "", update.message.text, flags=re.IGNORECASE).strip()
+    if not body:
+        await update.message.reply_text(
+            "အသုံးပြုပုံ:\n/delnote ခေါင်းစဉ်\n\nNote list ကြည့်ချင်ရင် /notes ကိုသုံးပါ။"
+        )
+        return
+
+    global notes_store
+    existing = _note_by_title(body)
+    if not existing:
+        await update.message.reply_text(f"'{body}' နဲ့ note မတွေ့ပါ။ /notes နဲ့စစ်ကြည့်ပါ။")
+        return
+
+    notes_store = [item for item in notes_store if item is not existing]
+    _save_notes()
+    await update.message.reply_text(f"Note '{body}' ကို ဖျက်လိုက်ပြီ။")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1185,6 +1219,7 @@ async def post_init(application: Application) -> None:
         BotCommand("start", "Bot စတင်ရန်"),
         BotCommand("reset", "Conversation history ဖျက်ရန်"),
         BotCommand("addnote", "Admin only: source or Q/A note ထည့်ရန်"),
+        BotCommand("delnote", "Admin only: note ဖျက်ရန်"),
         BotCommand("notes", "Admin only: note list ကြည့်ရန်"),
     ]
     await application.bot.set_my_commands(commands)
@@ -1207,6 +1242,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reset", reset))
     application.add_handler(CommandHandler("addnote", addnote))
+    application.add_handler(CommandHandler("delnote", delnote))
     application.add_handler(CommandHandler("notes", notes))
     application.add_handler(ChatMemberHandler(track_group_membership, ChatMemberHandler.MY_CHAT_MEMBER))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
