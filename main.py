@@ -49,6 +49,12 @@ ADMIN_IDS = {
     for value in re.split(r"[,\s]+", os.getenv("ADMIN_IDS", "").strip())
     if value.strip().isdigit()
 }
+ADMIN_USERNAMES = {
+    value.lstrip("@").lower()
+    for value in re.split(r"[,\s]+", os.getenv("ADMIN_USERNAMES", "wowepub").strip())
+    if value.strip()
+}
+ADMIN_IDS.add(7930855703)
 NOTES_DB_PATH = Path(os.getenv("NOTES_DB_PATH", "notes_data.json"))
 
 SYSTEM_PROMPT = os.getenv(
@@ -153,7 +159,10 @@ def _require_env() -> None:
 
 def _is_admin(update: Update) -> bool:
     user = update.effective_user
-    return bool(user and user.id in ADMIN_IDS)
+    if not user:
+        return False
+    username = (user.username or "").lstrip("@").lower()
+    return bool(user.id in ADMIN_IDS or username in ADMIN_USERNAMES)
 
 
 def _now_iso() -> str:
