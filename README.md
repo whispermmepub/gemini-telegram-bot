@@ -37,11 +37,13 @@ python main.py
 
 - `TELEGRAM_BOT_TOKEN`
 - `GEMINI_API_KEY`
+- `ADMIN_IDS` - comma-separated Telegram user IDs that can use `/addnote`
 
 ### Optional variables
 
 - `GEMINI_MODEL` - default `gemini-3.6-flash`
 - `SYSTEM_PROMPT` - bot ရဲ့ style ပြောင်းချင်ရင်
+- `NOTES_DB_PATH` - default `notes_data.json`
 
 ## Railway notes
 
@@ -73,6 +75,23 @@ Bot ကို URL ပို့လိုက်ရင် page ကို fetch လ�
 - Public webpage တွေမှာအကောင်းဆုံးအလုပ်လုပ်တယ်
 - Login လိုတဲ့ page, paywall, JavaScript-heavy site တွေမှာ extract မကောင်းနိုင်
 - ဖတ်မရရင် error ပြန်ပြမယ်
+
+## Admin notes
+
+`/addnote` နဲ့ curated sources ထည့်လို့ရပါတယ်။
+
+Example:
+
+```text
+/addnote Book Reviews | https://example.com/post1 https://example.com/post2 | fantasy, review, summary
+```
+
+အဲဒီလိုထည့်ပြီးရင် user မေးခွန်းထဲမှာ note title သို့မဟုတ် tag နဲ့ဆိုင်တဲ့အကြောင်းအရာတွေပါလာရင် bot က အရင်သိမ်းထားတဲ့ source တွေကိုဖတ်ပြီး answer ထုတ်မယ်။
+
+Admin-only commands:
+
+- `/addnote`
+- `/notes`
 
 ## How it works
 

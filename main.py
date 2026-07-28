@@ -1,8 +1,12 @@
 import asyncio
+import html
+import json
 from html import unescape
 import logging
 import os
 import re
+from datetime import datetime, timezone
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -25,6 +29,12 @@ logger = logging.getLogger("gemini-telegram-bot")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip()
+ADMIN_IDS = {
+    int(value)
+    for value in re.split(r"[,\s]+", os.getenv("ADMIN_IDS", "").strip())
+    if value.strip().isdigit()
+}
+NOTES_DB_PATH = Path(os.getenv("NOTES_DB_PATH", "notes_data.json"))
 
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
@@ -39,7 +49,9 @@ SYSTEM_PROMPT = os.getenv(
 MAX_TELEGRAM_MESSAGE = 4096
 BOT_USERNAME = ""
 user_sessions: Dict[str, str] = {}
+notes_store: list[dict] = []
 MAX_SOURCE_CHARS = 12000
+MAX_NOTE_SOURCE_CHARS = 18000
 URL_RE = re.compile(r"https?://[^\s<>\]\)\"']+")
 SOURCE_SYSTEM_PROMPT = (
     "You answer using only the provided webpage source text. "
@@ -122,6 +134,110 @@ def _require_env() -> None:
         raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 
 
+def _is_admin(update: Update) -> bool:
+    user = update.effective_user
+    return bool(user and user.id in ADMIN_IDS)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _load_notes() -> None:
+    global notes_store
+    if not NOTES_DB_PATH.exists():
+        notes_store = []
+        return
+    try:
+        with NOTES_DB_PATH.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        notes_store = payload if isinstance(payload, list) else []
+    except Exception as exc:
+        logger.warning("Failed to load notes DB: %s", exc)
+        notes_store = []
+
+
+def _save_notes() -> None:
+    NOTES_DB_PATH.write_text(json.dumps(notes_store, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _normalize_space_lower(text: str) -> str:
+    return re.sub(r"\s+", " ", text.lower()).strip()
+
+
+def _tokenize_query(text: str) -> list[str]:
+    tokens = re.findall(r"[A-Za-z0-9\u1000-\u109F\u1200-\u137F]+", text.lower())
+    stop_words = {"the", "and", "or", "to", "of", "in", "on", "a", "an", "is", "are", "for", "with"}
+    return [token for token in tokens if len(token) > 1 and token not in stop_words]
+
+
+def _note_blob(note: dict) -> str:
+    parts = [
+        str(note.get("title", "")),
+        " ".join(note.get("tags", [])),
+        " ".join(note.get("urls", [])),
+    ]
+    for source in note.get("sources", []):
+        parts.append(str(source.get("page_title", "")))
+        parts.append(str(source.get("description", "")))
+        parts.append(str(source.get("text", "")))
+    return _normalize_space_lower(" ".join(parts))
+
+
+def _score_note(note: dict, prompt: str) -> int:
+    blob = _note_blob(note)
+    normalized_prompt = _normalize_space_lower(prompt)
+    tokens = _tokenize_query(prompt)
+    if not tokens:
+        return 0
+
+    score = 0
+    title = _normalize_space_lower(str(note.get("title", "")))
+    if title and title in normalized_prompt:
+        score += 8
+
+    for tag in note.get("tags", []):
+        if _normalize_space_lower(str(tag)) in normalized_prompt:
+            score += 4
+
+    for token in tokens:
+        if token in title:
+            score += 3
+        if token in blob:
+            score += 1
+
+    phrase_hits = sum(
+        1 for phrase in ("စာအုပ်", "book", "review", "summary", "အညွှန်း", "recommend", "ေရးသား", "author")
+        if phrase in normalized_prompt and phrase in blob
+    )
+    score += phrase_hits * 2
+    return score
+
+
+def _best_note_match(prompt: str) -> Optional[dict]:
+    if not notes_store:
+        return None
+    ranked = sorted(
+        ((note, _score_note(note, prompt)) for note in notes_store),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    if not ranked or ranked[0][1] < 3:
+        return None
+    return ranked[0][0]
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    cleaned = _normalize_text(text)
+    if len(cleaned) <= limit:
+        return cleaned
+    cut = cleaned[:limit]
+    split_at = cut.rfind("\n")
+    if split_at > 1000:
+        cut = cut[:split_at]
+    return cut.strip()
+
+
 def _chunk_text(text: str, limit: int = MAX_TELEGRAM_MESSAGE) -> list[str]:
     text = text.strip()
     if len(text) <= limit:
@@ -139,6 +255,36 @@ def _chunk_text(text: str, limit: int = MAX_TELEGRAM_MESSAGE) -> list[str]:
         chunks.append(text[start:end].strip())
         start = end
     return [chunk for chunk in chunks if chunk]
+
+
+def _format_telegram_html(text: str) -> str:
+    placeholders: list[str] = []
+
+    def stash(markup: str) -> str:
+        token = f"__TG_HTML_{len(placeholders)}__"
+        placeholders.append(markup)
+        return token
+
+    def replace_block(match: re.Match[str]) -> str:
+        content = html.escape(match.group(1), quote=False)
+        return stash(f"<pre><code>{content}</code></pre>")
+
+    def replace_inline_code(match: re.Match[str]) -> str:
+        content = html.escape(match.group(1), quote=False)
+        return stash(f"<code>{content}</code>")
+
+    def replace_bold(match: re.Match[str]) -> str:
+        content = html.escape(match.group(1), quote=False)
+        return stash(f"<b>{content}</b>")
+
+    text = re.sub(r"```([\s\S]+?)```", replace_block, text)
+    text = re.sub(r"`([^`\n]+)`", replace_inline_code, text)
+    text = re.sub(r"\*\*(.+?)\*\*", replace_bold, text)
+
+    escaped = html.escape(text, quote=False)
+    for idx, markup in enumerate(placeholders):
+        escaped = escaped.replace(html.escape(f"__TG_HTML_{idx}__"), markup)
+    return escaped
 
 
 def _normalize_text(text: str) -> str:
@@ -262,6 +408,97 @@ def _build_source_prompt(user_prompt: str, url: str, title: str, description: st
     )
 
 
+def _parse_note_addition(text: str) -> tuple[str, list[str], list[str]]:
+    body = re.sub(r"^/addnote(?:@\w+)?\s*", "", text, flags=re.IGNORECASE).strip()
+    parts = [part.strip() for part in body.split("|") if part.strip()]
+
+    title = parts[0] if parts else ""
+    url_section = parts[1] if len(parts) > 1 else body
+    tag_section = parts[2] if len(parts) > 2 else ""
+
+    urls = _extract_urls(url_section if parts else body)
+    if not urls:
+        urls = _extract_urls(body)
+
+    if not title:
+        cleaned = _remove_urls(body, urls)
+        title = cleaned.split("|", 1)[0].strip()
+
+    tag_text = tag_section
+    if not tag_text and len(parts) >= 2:
+        tag_text = parts[-1] if len(parts) > 2 else ""
+
+    tags = [
+        tag.strip()
+        for tag in re.split(r"[,/;]+", tag_text)
+        if tag.strip()
+    ]
+    return title.strip(), urls, tags
+
+
+def _merge_unique_urls(*url_groups: list[str]) -> list[str]:
+    merged = []
+    seen = set()
+    for group in url_groups:
+        for url in group:
+            cleaned = _clean_url(url)
+            if cleaned and cleaned not in seen:
+                seen.add(cleaned)
+                merged.append(cleaned)
+    return merged
+
+
+def _note_by_title(title: str) -> Optional[dict]:
+    normalized = _normalize_space_lower(title)
+    for note in notes_store:
+        if _normalize_space_lower(str(note.get("title", ""))) == normalized:
+            return note
+    return None
+
+
+def _collect_source_snippet(url: str) -> dict:
+    html, final_url, _ = _fetch_url_html(url)
+    page_title, description, source_text = _extract_main_text_from_html(html)
+    return {
+        "url": final_url,
+        "page_title": page_title,
+        "description": description,
+        "text": _truncate_text(source_text, MAX_NOTE_SOURCE_CHARS),
+    }
+
+
+def _format_note_for_answer(note: dict, question: str) -> str:
+    source_lines = []
+    for source in note.get("sources", []):
+        lines = [
+            f"Source URL: {source.get('url', '')}",
+            f"Page title: {source.get('page_title', '')}",
+        ]
+        if source.get("description"):
+            lines.append(f"Description: {source.get('description')}")
+        if source.get("text"):
+            lines.append(f"Extracted text:\n{source.get('text')}")
+        source_lines.append("\n".join(lines))
+
+    source_text = "\n\n---\n\n".join(source_lines)
+    return _build_source_prompt(
+        question,
+        note.get("urls", [""])[0] if note.get("urls") else "",
+        str(note.get("title", "")),
+        " ".join(note.get("tags", [])),
+        source_text,
+    )
+
+
+def _upsert_note(note: dict) -> None:
+    global notes_store
+    existing = _note_by_title(str(note.get("title", "")))
+    if existing:
+        notes_store = [item for item in notes_store if item is not existing]
+    notes_store.append(note)
+    _save_notes()
+
+
 def _build_client() -> genai.Client:
     return genai.Client(api_key=GEMINI_API_KEY)
 
@@ -319,7 +556,11 @@ async def _send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
     if not update.message:
         return
     for part in _chunk_text(text):
-        await update.message.reply_text(part)
+        await update.message.reply_text(
+            _format_telegram_html(part),
+            parse_mode="HTML",
+            disable_web_page_preview=False,
+        )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -339,6 +580,66 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user:
         user_sessions.pop(user.id, None)
     await update.message.reply_text("Conversation reset ပြီးပါပြီ။")
+
+
+async def addnote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not _is_admin(update):
+        await update.message.reply_text("ဒီ command ကို admin ပဲ သုံးလို့ရပါတယ်။")
+        return
+
+    title, urls, tags = _parse_note_addition(update.message.text or "")
+    if update.message.reply_to_message and update.message.reply_to_message.text:
+        urls = _merge_unique_urls(urls, _extract_urls(update.message.reply_to_message.text))
+
+    if not title or not urls:
+        await update.message.reply_text(
+            "အသုံးပြုပုံ:\n"
+            "/addnote ခေါင်းစဉ် | https://example.com/a https://example.com/b | tag1, tag2"
+        )
+        return
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+    await update.message.reply_text("Source တွေ ဖတ်နေပါတယ်... ခဏစောင့်ပါ။")
+
+    try:
+        sources = [await asyncio.to_thread(_collect_source_snippet, url) for url in urls]
+        note = {
+            "title": title,
+            "urls": urls,
+            "tags": tags,
+            "sources": sources,
+            "created_by": update.effective_user.id if update.effective_user else None,
+            "created_at": _now_iso(),
+            "updated_at": _now_iso(),
+        }
+        _upsert_note(note)
+        await update.message.reply_text(
+            f"Note သိမ်းပြီးပါပြီ။\n"
+            f"Title: {title}\n"
+            f"URLs: {len(urls)} ခု\n"
+            f"Tags: {', '.join(tags) if tags else 'none'}"
+        )
+    except Exception as exc:
+        logger.exception("Failed to add note")
+        await update.message.reply_text(f"Note ထည့်မရပါ: {exc}")
+
+
+async def notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not _is_admin(update):
+        await update.message.reply_text("ဒီ command ကို admin ပဲ သုံးလို့ရပါတယ်။")
+        return
+    if not notes_store:
+        await update.message.reply_text("Note မရှိသေးပါ။")
+        return
+
+    lines = ["Saved notes:"]
+    for idx, note in enumerate(notes_store[:20], start=1):
+        lines.append(f"{idx}. {note.get('title', 'Untitled')} ({len(note.get('urls', []))} URLs)")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -403,6 +704,33 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text(f"URL processing error: {exc}")
         return
 
+    matched_note = _best_note_match(prompt)
+    if matched_note:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+        client: genai.Client = context.application.bot_data["genai_client"]
+        try:
+            source_prompt = _format_note_for_answer(matched_note, prompt)
+            reply, _ = await asyncio.to_thread(
+                _generate_reply_sync,
+                client,
+                _session_key(update.effective_chat.id, user.id),
+                source_prompt,
+                SOURCE_SYSTEM_PROMPT,
+                False,
+            )
+            if not reply:
+                reply = "သိမ်းထားတဲ့ note sources ပေါ်မူတည်ပြီး answer မထုတ်နိုင်ခဲ့ပါ။"
+            urls = matched_note.get("urls", [])
+            prefix = f"Matched note: {matched_note.get('title', 'Untitled')}"
+            if urls:
+                prefix += "\n" + "\n".join(f"- {url}" for url in urls[:3])
+            await _send_reply(update, context, f"{prefix}\n\n{reply}")
+            return
+        except Exception as exc:
+            logger.exception("Note answer failed")
+            await update.message.reply_text(f"Note answer error: {exc}")
+            return
+
     session_key = _session_key(update.effective_chat.id, user.id)
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
@@ -428,6 +756,8 @@ async def post_init(application: Application) -> None:
     commands = [
         BotCommand("start", "Bot စတင်ရန်"),
         BotCommand("reset", "Conversation history ဖျက်ရန်"),
+        BotCommand("addnote", "Admin only: source note ထည့်ရန်"),
+        BotCommand("notes", "Admin only: note list ကြည့်ရန်"),
     ]
     await application.bot.set_my_commands(commands)
     logger.info("Bot commands registered for @%s", BOT_USERNAME or "unknown")
@@ -435,6 +765,7 @@ async def post_init(application: Application) -> None:
 
 def main() -> None:
     _require_env()
+    _load_notes()
 
     application = (
         Application.builder()
@@ -446,6 +777,8 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reset", reset))
+    application.add_handler(CommandHandler("addnote", addnote))
+    application.add_handler(CommandHandler("notes", notes))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Starting bot with model=%s", GEMINI_MODEL)
