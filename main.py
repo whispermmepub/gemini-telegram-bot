@@ -201,6 +201,8 @@ def _note_blob(note: dict) -> str:
     parts = [
         str(note.get("title", "")),
         " ".join(note.get("tags", [])),
+        " ".join(note.get("triggers", [])),
+        str(note.get("answer", "")),
         " ".join(note.get("urls", [])),
     ]
     for source in note.get("sources", []):
@@ -226,6 +228,11 @@ def _score_note(note: dict, prompt: str) -> int:
         if _normalize_space_lower(str(tag)) in normalized_prompt:
             score += 4
 
+    for trigger in note.get("triggers", []):
+        trigger_norm = _normalize_space_lower(str(trigger))
+        if trigger_norm and trigger_norm in normalized_prompt:
+            score += 6
+
     for token in tokens:
         if token in title:
             score += 3
@@ -233,7 +240,8 @@ def _score_note(note: dict, prompt: str) -> int:
             score += 1
 
     phrase_hits = sum(
-        1 for phrase in ("စာအုပ်", "book", "review", "summary", "အညွှန်း", "recommend", "ေရးသား", "author")
+        1
+        for phrase in ("စာအုပ်", "book", "review", "summary", "အညွှန်း", "recommend", "ေရးသား", "author", "space", "question")
         if phrase in normalized_prompt and phrase in blob
     )
     score += phrase_hits * 2
@@ -251,6 +259,32 @@ def _best_note_match(prompt: str) -> Optional[dict]:
     if not ranked or ranked[0][1] < 3:
         return None
     return ranked[0][0]
+
+
+def _render_note_reply(note: dict, question: str) -> str:
+    if note.get("kind") == "text" and note.get("answer"):
+        return str(note.get("answer", "")).strip()
+
+    source_lines = []
+    for source in note.get("sources", []):
+        lines = [
+            f"Source URL: {source.get('url', '')}",
+            f"Page title: {source.get('page_title', '')}",
+        ]
+        if source.get("description"):
+            lines.append(f"Description: {source.get('description')}")
+        if source.get("text"):
+            lines.append(f"Extracted text:\n{source.get('text')}")
+        source_lines.append("\n".join(lines))
+
+    source_text = "\n\n---\n\n".join(source_lines)
+    return _build_source_prompt(
+        question,
+        note.get("urls", [""])[0] if note.get("urls") else "",
+        str(note.get("title", "")),
+        " ".join(note.get("tags", [])),
+        source_text,
+    )
 
 
 def _truncate_text(text: str, limit: int) -> str:
@@ -453,32 +487,48 @@ def _build_source_prompt(user_prompt: str, url: str, title: str, description: st
     )
 
 
-def _parse_note_addition(text: str) -> tuple[str, list[str], list[str]]:
+def _split_list_field(text: str) -> list[str]:
+    return [part.strip() for part in re.split(r"[,/;]+", text) if part.strip()]
+
+
+def _parse_note_addition(text: str) -> dict:
     body = re.sub(r"^/addnote(?:@\w+)?\s*", "", text, flags=re.IGNORECASE).strip()
     parts = [part.strip() for part in body.split("|") if part.strip()]
 
     title = parts[0] if parts else ""
-    url_section = parts[1] if len(parts) > 1 else body
-    tag_section = parts[2] if len(parts) > 2 else ""
+    content_parts = parts[1:] if len(parts) > 1 else []
+    joined_content = " ".join(content_parts)
+    urls = _extract_urls(joined_content or body)
 
-    urls = _extract_urls(url_section if parts else body)
-    if not urls:
-        urls = _extract_urls(body)
+    if urls:
+        if not title:
+            cleaned = _remove_urls(body, urls)
+            title = cleaned.split("|", 1)[0].strip()
+        tags = _split_list_field(content_parts[-1]) if len(content_parts) >= 2 and not _extract_urls(content_parts[-1]) else []
+        return {
+            "kind": "source",
+            "title": title.strip(),
+            "urls": _merge_unique_urls(urls),
+            "tags": tags,
+            "triggers": [],
+            "answer": "",
+        }
+
+    triggers_text = content_parts[0] if len(content_parts) >= 1 else ""
+    answer_text = content_parts[1] if len(content_parts) >= 2 else ""
+    tags_text = content_parts[2] if len(content_parts) >= 3 else ""
 
     if not title:
-        cleaned = _remove_urls(body, urls)
-        title = cleaned.split("|", 1)[0].strip()
+        title = triggers_text or body
 
-    tag_text = tag_section
-    if not tag_text and len(parts) >= 2:
-        tag_text = parts[-1] if len(parts) > 2 else ""
-
-    tags = [
-        tag.strip()
-        for tag in re.split(r"[,/;]+", tag_text)
-        if tag.strip()
-    ]
-    return title.strip(), urls, tags
+    return {
+        "kind": "text",
+        "title": title.strip(),
+        "urls": [],
+        "tags": _split_list_field(tags_text),
+        "triggers": _split_list_field(triggers_text or title),
+        "answer": answer_text.strip(),
+    }
 
 
 def _merge_unique_urls(*url_groups: list[str]) -> list[str]:
@@ -810,37 +860,48 @@ async def addnote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("ဒီ command ကို admin ပဲ သုံးလို့ရပါတယ်။")
         return
 
-    title, urls, tags = _parse_note_addition(update.message.text or "")
+    note = _parse_note_addition(update.message.text or "")
     if update.message.reply_to_message and update.message.reply_to_message.text:
-        urls = _merge_unique_urls(urls, _extract_urls(update.message.reply_to_message.text))
+        if note.get("kind") == "source":
+            note["urls"] = _merge_unique_urls(note.get("urls", []), _extract_urls(update.message.reply_to_message.text))
 
-    if not title or not urls:
+    if not note.get("title"):
         await update.message.reply_text(
             "အသုံးပြုပုံ:\n"
+            "/addnote ခေါင်းစဉ် | question words | answer text | tag1, tag2\n"
             "/addnote ခေါင်းစဉ် | https://example.com/a https://example.com/b | tag1, tag2"
+        )
+        return
+    if note.get("kind") == "text" and not note.get("answer"):
+        await update.message.reply_text(
+            "Plain note ထည့်ချင်ရင် answer text လိုပါတယ်။\n"
+            "ဥပမာ:\n"
+            "/addnote Space Question | space question, spacing issue | ဒီဟာက အဖြေပါ | faq, help"
         )
         return
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-    await update.message.reply_text("Source တွေ ဖတ်နေပါတယ်... ခဏစောင့်ပါ။")
+    await update.message.reply_text("Note ကို သိမ်းနေပါတယ်... ခဏစောင့်ပါ။")
 
     try:
-        sources = [await asyncio.to_thread(_collect_source_snippet, url) for url in urls]
-        note = {
-            "title": title,
-            "urls": urls,
-            "tags": tags,
-            "sources": sources,
-            "created_by": update.effective_user.id if update.effective_user else None,
-            "created_at": _now_iso(),
-            "updated_at": _now_iso(),
-        }
+        note["created_by"] = update.effective_user.id if update.effective_user else None
+        note["created_at"] = _now_iso()
+        note["updated_at"] = _now_iso()
+        if note.get("kind") == "source":
+            sources = [await asyncio.to_thread(_collect_source_snippet, url) for url in note.get("urls", [])]
+            note["sources"] = sources
+        else:
+            note["sources"] = []
         _upsert_note(note)
+        extra = f"Kind: {note.get('kind', 'source')}"
+        if note.get("kind") == "text" and note.get("triggers"):
+            extra += f"\nTriggers: {', '.join(note.get('triggers', []))}"
         await update.message.reply_text(
             f"Note သိမ်းပြီးပါပြီ။\n"
-            f"Title: {title}\n"
-            f"URLs: {len(urls)} ခု\n"
-            f"Tags: {', '.join(tags) if tags else 'none'}"
+            f"Title: {note.get('title')}\n"
+            f"URLs: {len(note.get('urls', []))} ခု\n"
+            f"Tags: {', '.join(note.get('tags', [])) if note.get('tags') else 'none'}\n"
+            f"{extra}"
         )
     except Exception as exc:
         logger.exception("Failed to add note")
@@ -859,7 +920,7 @@ async def notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     lines = ["Saved notes:"]
     for idx, note in enumerate(notes_store[:20], start=1):
-        lines.append(f"{idx}. {note.get('title', 'Untitled')} ({len(note.get('urls', []))} URLs)")
+        lines.append(f"{idx}. {note.get('title', 'Untitled')} [{note.get('kind', 'source')}] ({len(note.get('urls', []))} URLs)")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -929,20 +990,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     matched_note = _best_note_match(prompt)
     if matched_note:
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-        client: genai.Client = context.application.bot_data["genai_client"]
         try:
-            source_prompt = _format_note_for_answer(matched_note, prompt)
-            reply, _ = await asyncio.to_thread(
-                _generate_reply_sync,
-                client,
-                _session_key(update.effective_chat.id, user.id),
-                source_prompt,
-                SOURCE_SYSTEM_PROMPT,
-                False,
-            )
-            if not reply:
-                reply = "သိမ်းထားတဲ့ note sources ပေါ်မူတည်ပြီး answer မထုတ်နိုင်ခဲ့ပါ။"
+            if matched_note.get("kind") == "text" and matched_note.get("answer"):
+                reply = _render_note_reply(matched_note, prompt)
+            else:
+                await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+                client: genai.Client = context.application.bot_data["genai_client"]
+                source_prompt = _render_note_reply(matched_note, prompt)
+                reply, _ = await asyncio.to_thread(
+                    _generate_reply_sync,
+                    client,
+                    _session_key(update.effective_chat.id, user.id),
+                    source_prompt,
+                    SOURCE_SYSTEM_PROMPT,
+                    False,
+                )
+                if not reply:
+                    reply = "သိမ်းထားတဲ့ note sources ပေါ်မူတည်ပြီး answer မထုတ်နိုင်ခဲ့ပါ။"
             urls = matched_note.get("urls", [])
             prefix = f"Matched note: {matched_note.get('title', 'Untitled')}"
             if urls:
@@ -979,7 +1043,7 @@ async def post_init(application: Application) -> None:
     commands = [
         BotCommand("start", "Bot စတင်ရန်"),
         BotCommand("reset", "Conversation history ဖျက်ရန်"),
-        BotCommand("addnote", "Admin only: source note ထည့်ရန်"),
+        BotCommand("addnote", "Admin only: source or Q/A note ထည့်ရန်"),
         BotCommand("notes", "Admin only: note list ကြည့်ရန်"),
     ]
     await application.bot.set_my_commands(commands)

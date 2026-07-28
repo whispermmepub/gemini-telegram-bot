@@ -101,7 +101,7 @@ Bot ကို URL ပို့လိုက်ရင် page ကို fetch လ�
 
 ## Admin notes
 
-`/addnote` နဲ့ curated sources ထည့်လို့ရပါတယ်။
+`/addnote` နဲ့ curated sources သို့မဟုတ် plain question/answer notes ထည့်လို့ရပါတယ်။
 
 Example:
 
@@ -110,6 +110,21 @@ Example:
 ```
 
 အဲဒီလိုထည့်ပြီးရင် user မေးခွန်းထဲမှာ note title သို့မဟုတ် tag နဲ့ဆိုင်တဲ့အကြောင်းအရာတွေပါလာရင် bot က အရင်သိမ်းထားတဲ့ source တွေကိုဖတ်ပြီး answer ထုတ်မယ်။
+
+Plain question/answer note တွေလည်း ထည့်လို့ရပါတယ်:
+
+```text
+/addnote Space Question | space question, spacing issue | ဒီဟာက သက်ဆိုင်ရာ အဖြေပါ | faq, help
+```
+
+အဲဒီ format မှာ:
+
+- 1st part = note title
+- 2nd part = question words / trigger phrases
+- 3rd part = answer text
+- 4th part = optional tags
+
+ဒီ mode က `space question` လို phrase ပါတဲ့ မေးခွန်းတွေကို token overlap နဲ့ဆီလျော်သလို match လုပ်ပြီး answer ပြန်ပေးနိုင်တယ်။
 
 Admin-only commands:
 
