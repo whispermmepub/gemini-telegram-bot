@@ -238,6 +238,25 @@ def _truncate_text(text: str, limit: int) -> str:
     return cut.strip()
 
 
+def _friendly_model_error(exc: Exception) -> str:
+    text = str(exc).lower()
+    if any(
+        marker in text
+        for marker in (
+            "too_many_requests",
+            "quota",
+            "rate limit",
+            "rate-limit",
+            "429",
+        )
+    ):
+        return (
+            "Gemini quota ပြည့်သွားပါတယ်။ "
+            "ခဏစောင့်ပြီး ထပ်မေးပါ၊ ဒါမှမဟုတ် billed API key သုံးပါ။"
+        )
+    return "အခု request ကို process မလုပ်နိုင်သေးပါ။ ခဏနားပြီး ထပ်စမ်းပါ။"
+
+
 def _chunk_text(text: str, limit: int = MAX_TELEGRAM_MESSAGE) -> list[str]:
     text = text.strip()
     if len(text) <= limit:
@@ -524,7 +543,13 @@ def _extract_group_prompt(text: str) -> Optional[str]:
 
 
 def _match_faq(prompt: str) -> Optional[str]:
-    lowered = prompt.lower()
+    lowered = _normalize_space_lower(prompt)
+    intent_markers = (
+        "ဖတ်", "read", "open", "ဖွင့်", "how", "ဘယ်လို", "ဘယ္လို", "app", "အသုံးပြု", "download", "install"
+    )
+    if not any(marker in lowered for marker in intent_markers):
+        return None
+
     for keywords, response in FAQ_RESPONSES:
         if all(keyword in lowered for keyword in keywords):
             return response
@@ -701,7 +726,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text(f"URL ဖတ်မရပါ: {exc}")
         except Exception as exc:
             logger.exception("URL processing failed")
-            await update.message.reply_text(f"URL processing error: {exc}")
+            await update.message.reply_text(_friendly_model_error(exc))
         return
 
     matched_note = _best_note_match(prompt)
@@ -728,7 +753,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         except Exception as exc:
             logger.exception("Note answer failed")
-            await update.message.reply_text(f"Note answer error: {exc}")
+            await update.message.reply_text(_friendly_model_error(exc))
             return
 
     session_key = _session_key(update.effective_chat.id, user.id)
@@ -746,7 +771,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _send_reply(update, context, reply)
     except Exception as exc:
         logger.exception("Gemini request failed")
-        await update.message.reply_text(f"Error: {exc}")
+        await update.message.reply_text(_friendly_model_error(exc))
 
 
 async def post_init(application: Application) -> None:
