@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 .env
 notes_data.json
+groups_data.json

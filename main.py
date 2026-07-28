@@ -5,18 +5,20 @@ from html import unescape
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time as dt_time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from typing import Dict, Optional
+from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
 from google import genai
 from telegram import BotCommand, Update
 from telegram.constants import ChatAction
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.error import BadRequest, Forbidden
+from telegram.ext import Application, ChatMemberHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 
 logging.basicConfig(
@@ -56,6 +58,8 @@ ADMIN_USERNAMES = {
 }
 ADMIN_IDS.add(7930855703)
 NOTES_DB_PATH = Path(os.getenv("NOTES_DB_PATH", "notes_data.json"))
+GROUPS_DB_PATH = Path(os.getenv("GROUPS_DB_PATH", "groups_data.json"))
+BANGKOK_TZ = ZoneInfo(os.getenv("THAILAND_TIMEZONE", "Asia/Bangkok"))
 
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
@@ -76,6 +80,25 @@ MAX_NOTE_SOURCE_CHARS = 18000
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "8"))
 MAX_STORED_MESSAGE_CHARS = int(os.getenv("MAX_STORED_MESSAGE_CHARS", "1200"))
 URL_RE = re.compile(r"https?://[^\s<>\]\)\"']+")
+registered_groups: Dict[int, dict] = {}
+
+MORNING_TEMPLATES = [
+    "🌅 မင်္ဂလာနံနက်ခင်းပါ။\nဒီနေ့စာဖတ်ဖို့ နေရာလွတ်နည်းနည်းထားပြီး စိတ်အေးအေးနဲ့ စတင်ကြပါစို့။",
+    "☀️ Good morning!\nစာအုပ်တစ်အုပ်၊ ကော်ဖီတစ်ခွက်၊ စိတ်ကူးကောင်းတစ်ခုနဲ့ ဒီနေ့ကိုလှလှပပ စတင်လိုက်ပါ။",
+    "🌤️ မနက်ခင်းလေးက အေးမြနေပြီ။\nစာဖတ်သူတွေ ဒီနေ့လည်း စာလုံးတွေကြားထဲက အလင်းရောင်နည်းနည်း ရှာကြပါစို့။",
+    "🌼 မင်္ဂလာနံနက်ခင်းပါ။\nတစ်နေ့တာကို စာအုပ်နံ့လေးနဲ့ စတင်ရင် စိတ်ကပိုတည်ငြိမ်လာတတ်ပါတယ်။",
+    "✨ Good morning, readers.\nဒီနေ့ဖတ်မယ့် စာမျက်နှာတွေက မင်းရဲ့နေ့ကို ပိုလှစေပါစေ။",
+    "🌿 နေ့သစ်စပြီ။\nအသစ်မြင်၊ အသစ်ဖတ်၊ အသစ်တွေးပြီး စိတ်သစ်ကို ဖွင့်လိုက်ပါ။",
+]
+
+NIGHT_TEMPLATES = [
+    "🌙 ညချမ်းပါ။\nဒီနေ့ဖတ်ခဲ့သမျှ စာတွေကို တိတ်တိတ်လေး ပြန်လည်စဉ်းစားပြီး အနားယူလိုက်ပါ။",
+    "✨ Good night.\nစာအုပ်တစ်အုပ်ရဲ့ နောက်ဆုံးစာမျက်နှာလိုပဲ ဒီနေ့ကို နူးညံ့စွာ ပိတ်လိုက်ကြရအောင်။",
+    "🌌 ညညကောင်းပါစေ။\nမနက်ဖြန်အတွက် စိတ်လန်းဆန်းမှုနဲ့ အိပ်ရာဝင်ပါ။",
+    "🕯️ ညချမ်းပါ။\nစာဖတ်သူရဲ့ အိပ်မက်တွေကလည်း လှပနေစေချင်ပါတယ်။",
+    "🌠 Good night, readers.\nဒီနေ့ရဲ့ စကားလုံးတွေကို စိတ်ထဲမှာ သိုထားပြီး အေးအေးချမ်းချမ်း အိပ်ပါ။",
+    "💫 ညအဆုံးမှာ စာအုပ်ကောင်းတစ်အုပ်လို နူးညံ့တဲ့ အနားယူမှု ရပါစေ။",
+]
 SOURCE_SYSTEM_PROMPT = (
     "You answer using only the provided webpage source text. "
     "If the source does not contain the answer, say so clearly. "
@@ -165,6 +188,87 @@ def _is_admin(update: Update) -> bool:
     return bool(user.id in ADMIN_IDS or username in ADMIN_USERNAMES)
 
 
+def _is_group_chat_id(chat_id: int) -> bool:
+    return chat_id < 0
+
+
+def _register_group_chat(chat) -> None:
+    if not chat or not _is_group_chat_id(chat.id):
+        return
+    now = _now_iso()
+    registered_groups[chat.id] = {
+        "chat_id": chat.id,
+        "title": getattr(chat, "title", "") or "",
+        "type": getattr(chat, "type", "") or "",
+        "registered_at": now,
+        "updated_at": now,
+    }
+    _save_groups()
+
+
+def _unregister_group_chat(chat_id: int) -> None:
+    if chat_id in registered_groups:
+        registered_groups.pop(chat_id, None)
+        _save_groups()
+
+
+def _daily_index(salt: int, size: int) -> int:
+    return (datetime.now(BANGKOK_TZ).toordinal() + salt) % size if size else 0
+
+
+def _morning_message() -> str:
+    return MORNING_TEMPLATES[_daily_index(11, len(MORNING_TEMPLATES))]
+
+
+def _night_message() -> str:
+    return NIGHT_TEMPLATES[_daily_index(29, len(NIGHT_TEMPLATES))]
+
+
+def _current_group_ids() -> list[int]:
+    return sorted(registered_groups.keys())
+
+
+async def _broadcast_to_groups(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    chat_ids = _current_group_ids()
+    if not chat_ids:
+        logger.info("No registered groups to broadcast to.")
+        return
+
+    for chat_id in chat_ids:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text)
+        except (Forbidden, BadRequest) as exc:
+            logger.warning("Removing unreachable group %s: %s", chat_id, exc)
+            _unregister_group_chat(chat_id)
+        except Exception as exc:
+            logger.exception("Failed to broadcast to group %s: %s", chat_id, exc)
+
+
+async def send_morning_message(context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _broadcast_to_groups(context, _morning_message())
+
+
+async def send_night_message(context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _broadcast_to_groups(context, _night_message())
+
+
+async def track_group_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_member_update = update.my_chat_member or update.chat_member
+    if not chat_member_update:
+        return
+
+    chat = chat_member_update.chat
+    if not chat or not _is_group_chat_id(chat.id):
+        return
+
+    old_status = getattr(chat_member_update.old_chat_member, "status", None)
+    new_status = getattr(chat_member_update.new_chat_member, "status", None)
+    if new_status in {"member", "administrator", "creator"}:
+        _register_group_chat(chat)
+    elif old_status in {"member", "administrator", "creator"} and new_status in {"left", "kicked"}:
+        _unregister_group_chat(chat.id)
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -185,6 +289,31 @@ def _load_notes() -> None:
 
 def _save_notes() -> None:
     NOTES_DB_PATH.write_text(json.dumps(notes_store, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_groups() -> None:
+    global registered_groups
+    if not GROUPS_DB_PATH.exists():
+        registered_groups = {}
+        return
+    try:
+        with GROUPS_DB_PATH.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        groups: Dict[int, dict] = {}
+        if isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, dict) and str(item.get("chat_id", "")).lstrip("-").isdigit():
+                    chat_id = int(item["chat_id"])
+                    groups[chat_id] = item
+        registered_groups = groups
+    except Exception as exc:
+        logger.warning("Failed to load groups DB: %s", exc)
+        registered_groups = {}
+
+
+def _save_groups() -> None:
+    payload = list(registered_groups.values())
+    GROUPS_DB_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _normalize_space_lower(text: str) -> str:
@@ -937,6 +1066,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if _is_group_chat(update):
+        _register_group_chat(update.effective_chat)
+
+    if _is_group_chat(update):
         replied_to_bot = bool(
             update.message.reply_to_message
             and update.message.reply_to_message.from_user
@@ -1053,6 +1185,7 @@ async def post_init(application: Application) -> None:
 def main() -> None:
     _require_env()
     _load_notes()
+    _load_groups()
 
     application = (
         Application.builder()
@@ -1066,7 +1199,22 @@ def main() -> None:
     application.add_handler(CommandHandler("reset", reset))
     application.add_handler(CommandHandler("addnote", addnote))
     application.add_handler(CommandHandler("notes", notes))
+    application.add_handler(ChatMemberHandler(track_group_membership, ChatMemberHandler.MY_CHAT_MEMBER))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    if application.job_queue is None:
+        logger.warning("Job queue is unavailable; daily group broadcasts are disabled.")
+    else:
+        application.job_queue.run_daily(
+            send_morning_message,
+            time=dt_time(hour=6, minute=30, tzinfo=BANGKOK_TZ),
+            name="daily_morning_message",
+        )
+        application.job_queue.run_daily(
+            send_night_message,
+            time=dt_time(hour=21, minute=0, tzinfo=BANGKOK_TZ),
+            name="daily_night_message",
+        )
 
     logger.info("Starting bot with model=%s", GEMINI_MODEL)
     application.run_polling(drop_pending_updates=True)

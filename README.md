@@ -11,6 +11,7 @@ Telegram bot တစ်ခုကို Gemini API နဲ့ ချိတ်ထာ
 - Bot ကို group admin ပေးထားပြီး သုံးနိုင်
 - URL ပို့ရင် page ထဲက main article text ကိုဖတ်ပြီး source-based answer ပေး
 - `PROVIDER=auto` နဲ့ Gemini -> OpenRouter free -> DeepSeek -> Ollama local fallback သုံးနိုင်
+- Thailand time နံနက် `06:30` တိတိ / ည `21:00` တိတိ group တွေထဲ morning / good night message ပို့
 - Railway နဲ့ deploy လုပ်လို့ရ
 
 ## Local setup
@@ -56,6 +57,8 @@ python main.py
 - `OLLAMA_BASE_URL` - default `http://localhost:11434`
 - `OLLAMA_MODEL` - default `llama3.1:8b`
 - `NOTES_DB_PATH` - default `notes_data.json`
+- `GROUPS_DB_PATH` - default `groups_data.json`
+- `THAILAND_TIMEZONE` - default `Asia/Bangkok`
 
 ## Railway notes
 
@@ -72,6 +75,10 @@ Railway ပေါ်က bot က သင့် laptop ရဲ့ localhost ကိ�
 
 DeepSeek ကို သုံးချင်ရင် `DEEPSEEK_API_KEY` နဲ့ `DEEPSEEK_MODEL` ကို variables ထဲထည့်ပါ။
 OpenRouter ထက်ပြီးတဲ့ cloud fallback တစ်ခုအဖြစ်လည်း သုံးလို့ရပါတယ်။
+
+နေ့စဉ် `06:30` နဲ့ `21:00` messages တွေက bot register လုပ်ထားတဲ့ group တွေကိုပဲ သွားမယ်။
+Group list ကို `groups_data.json` ထဲမှာထားပြီး persistent storage မရှိရင် redeploy/restart နောက်ပိုင်း ဆုံးနိုင်တယ်။
+အမြဲတမ်းထားချင်ရင် Railway volume attach လုပ်ထားပါ။
 
 ## Group usage
 
