@@ -621,55 +621,28 @@ def _build_source_prompt(user_prompt: str, url: str, title: str, description: st
     )
 
 
-def _split_list_field(text: str) -> list[str]:
-    return [part.strip() for part in re.split(r"[,/;]+", text) if part.strip()]
-
-
 def _parse_note_addition(text: str) -> dict:
     body = re.sub(r"^/addnote(?:@\w+)?\s*", "", text, flags=re.IGNORECASE).strip()
-    parts = [part.strip() for part in body.split("|") if part.strip()]
 
-    title = parts[0] if parts else ""
-    content_parts = parts[1:] if len(parts) > 1 else []
-    joined_content = " ".join(content_parts)
-    urls = _extract_urls(joined_content or body)
+    sep = " - "
+    dash_idx = body.find(sep)
+    if dash_idx > 0:
+        question = body[:dash_idx].strip()
+        answer = body[dash_idx + len(sep):].strip()
+    else:
+        question = body
+        answer = ""
 
-    if urls:
-        has_pipe = "|" in body
-        if has_pipe:
-            title = parts[0]
-        else:
-            cleaned = _remove_urls(body, urls)
-            title = cleaned.strip()
-            if not title:
-                parsed = urlparse(urls[0])
-                domain = parsed.netloc.replace("www.", "")
-                path = parsed.path.strip("/").replace("/", " - ").replace("-", " ").replace("_", " ")
-                title = f"{domain} - {path}" if path else domain
-        tags = _split_list_field(content_parts[-1]) if len(content_parts) >= 2 and not _extract_urls(content_parts[-1]) else []
-        return {
-            "kind": "source",
-            "title": title.strip(),
-            "urls": _merge_unique_urls(urls),
-            "tags": tags,
-            "triggers": [],
-            "answer": "",
-        }
-
-    triggers_text = content_parts[0] if len(content_parts) >= 1 else ""
-    answer_text = content_parts[1] if len(content_parts) >= 2 else ""
-    tags_text = content_parts[2] if len(content_parts) >= 3 else ""
-
-    if not title:
-        title = triggers_text or body
+    triggers = _tokenize_query(question)
 
     return {
         "kind": "text",
-        "title": title.strip(),
+        "title": question,
         "urls": [],
-        "tags": _split_list_field(tags_text),
-        "triggers": _split_list_field(triggers_text or title),
-        "answer": answer_text.strip(),
+        "tags": [],
+        "triggers": triggers,
+        "answer": answer,
+        "sources": [],
     }
 
 
@@ -1007,52 +980,32 @@ async def addnote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     note = _parse_note_addition(update.message.text or "")
-    if update.message.reply_to_message and update.message.reply_to_message.text:
-        if note.get("kind") == "source":
-            note["urls"] = _merge_unique_urls(note.get("urls", []), _extract_urls(update.message.reply_to_message.text))
 
     if not note.get("title"):
         await update.message.reply_text(
             "အသုံးပြုပုံ:\n"
-            "/addnote ခေါင်းစဉ် | question words | answer text | tag1, tag2\n"
-            "/addnote ခေါင်းစဉ် | https://example.com/a https://example.com/b | tag1, tag2"
+            "/addnote အမေး - အဖြေ"
         )
         return
-    if note.get("kind") == "text" and not note.get("answer"):
+    if not note.get("answer"):
         await update.message.reply_text(
-            "Plain note ထည့်ချင်ရင် answer text လိုပါတယ်။\n"
+            "အဖြေ ထည့်ဖို့လိုပါတယ်။\n"
             "ဥပမာ:\n"
-            "/addnote Space Question | space question, spacing issue | ဒီဟာက အဖြေပါ | faq, help"
+            "/addnote android တွင် epub ဘယ်လိုဖတ်ရလဲ - ဒီလိုဖတ်ပါ"
         )
         return
 
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-    await update.message.reply_text("Note ကို သိမ်းနေပါတယ်... ခဏစောင့်ပါ။")
+    note["created_by"] = update.effective_user.id if update.effective_user else None
+    note["created_at"] = _now_iso()
+    note["updated_at"] = _now_iso()
+    note["sources"] = []
+    _upsert_note(note)
 
-    try:
-        note["created_by"] = update.effective_user.id if update.effective_user else None
-        note["created_at"] = _now_iso()
-        note["updated_at"] = _now_iso()
-        if note.get("kind") == "source":
-            sources = [await asyncio.to_thread(_collect_source_snippet, url) for url in note.get("urls", [])]
-            note["sources"] = sources
-        else:
-            note["sources"] = []
-        _upsert_note(note)
-        extra = f"Kind: {note.get('kind', 'source')}"
-        if note.get("kind") == "text" and note.get("triggers"):
-            extra += f"\nTriggers: {', '.join(note.get('triggers', []))}"
-        await update.message.reply_text(
-            f"Note သိမ်းပြီးပါပြီ။\n"
-            f"Title: {note.get('title')}\n"
-            f"URLs: {len(note.get('urls', []))} ခု\n"
-            f"Tags: {', '.join(note.get('tags', [])) if note.get('tags') else 'none'}\n"
-            f"{extra}"
-        )
-    except Exception as exc:
-        logger.exception("Failed to add note")
-        msg = f"Note သိမ်းလို့မရပါ။\n{_friendly_model_error(exc)}"
-        await update.message.reply_text(msg)
+    await update.message.reply_text(
+        f"Note သိမ်းပြီးပါပြီ။\n"
+        f"အမေး: {note.get('title')}\n"
+        f"အဖြေ: {note.get('answer')}"
+    )
 
 
 async def notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1067,7 +1020,10 @@ async def notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     lines = ["Saved notes:"]
     for idx, note in enumerate(notes_store[:20], start=1):
-        lines.append(f"{idx}. {note.get('title', 'Untitled')} [{note.get('kind', 'source')}] ({len(note.get('urls', []))} URLs)")
+        answer_preview = (note.get("answer") or "")[:60]
+        if answer_preview:
+            answer_preview = f" → {answer_preview}"
+        lines.append(f"{idx}. {note.get('title', 'Untitled')}{answer_preview}")
     await update.message.reply_text("\n".join(lines))
 
 
