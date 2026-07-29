@@ -1037,19 +1037,63 @@ async def delnote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     body = re.sub(r"^/delnote(?:@\w+)?\s*", "", update.message.text, flags=re.IGNORECASE).strip()
     if not body:
         await update.message.reply_text(
-            "အသုံးပြုပုံ:\n/delnote ခေါင်းစဉ်\n\nNote list ကြည့်ချင်ရင် /notes ကိုသုံးပါ။"
+            "အသုံးပြုပုံ:\n/delnote ခေါင်းစဉ် (သို့) /delnote အမှတ်\n\nNote list ကြည့်ချင်ရင် /notes ကိုသုံးပါ။"
         )
         return
 
     global notes_store
-    existing = _note_by_title(body)
-    if not existing:
-        await update.message.reply_text(f"'{body}' နဲ့ note မတွေ့ပါ။ /notes နဲ့စစ်ကြည့်ပါ။")
+    note = None
+
+    # 1) Delete by index number (1-based from /notes)
+    if body.isdigit():
+        idx = int(body) - 1
+        if 0 <= idx < len(notes_store):
+            note = notes_store[idx]
+        if not note:
+            await update.message.reply_text(f"အမှတ် {body} note မတွေ့ပါ။ /notes နဲ့စစ်ကြည့်ပါ။")
+            return
+
+    # 2) Exact title match
+    if note is None:
+        note = _note_by_title(body)
+
+    # 3) First " - " segment as title
+    if note is None and " - " in body:
+        first_part = body.split(" - ", 1)[0].strip()
+        note = _note_by_title(first_part)
+
+    # 4) Partial match: title contains search OR search contains title
+    if note is None:
+        norm = _normalize_space_lower(body)
+        for n in notes_store:
+            t = _normalize_space_lower(str(n.get("title", "")))
+            if norm in t or t in norm:
+                note = n
+                break
+
+    # 5) Partial match on answer
+    if note is None:
+        norm = _normalize_space_lower(body)
+        for n in notes_store:
+            a = _normalize_space_lower(str(n.get("answer", "")))
+            if norm in a:
+                note = n
+                break
+
+    if note is None:
+        await update.message.reply_text(
+            f"'{body}' နဲ့ note မတွေ့ပါ။\n"
+            f"/notes နဲ့စစ်ပြီး /delnote အမှတ် (ဥပမာ /delnote 1) နဲ့ဖျက်ကြည့်ပါ။"
+        )
         return
 
-    notes_store = [item for item in notes_store if item is not existing]
+    notes_store = [item for item in notes_store if item is not note]
     _save_notes()
-    await update.message.reply_text(f"Note '{body}' ကို ဖျက်လိုက်ပြီ။")
+    await update.message.reply_text(
+        f"Note ဖျက်ပြီးပါပြီ။\n"
+        f"Title: {note.get('title', '')}\n"
+        f"Answer: {note.get('answer', '')}"
+    )
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1174,8 +1218,8 @@ async def post_init(application: Application) -> None:
     commands = [
         BotCommand("start", "Bot စတင်ရန်"),
         BotCommand("reset", "Conversation history ဖျက်ရန်"),
-        BotCommand("addnote", "Admin only: source or Q/A note ထည့်ရန်"),
-        BotCommand("delnote", "Admin only: note ဖျက်ရန်"),
+        BotCommand("addnote", "Admin only: Q&A note ထည့်ရန် (/add အမေး - အဖြေ)"),
+        BotCommand("delnote", "Admin only: note ဖျက်ရန် (/del ခေါင်းစဉ်)"),
         BotCommand("notes", "Admin only: note list ကြည့်ရန်"),
     ]
     await application.bot.set_my_commands(commands)
@@ -1197,8 +1241,8 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reset", reset))
-    application.add_handler(CommandHandler("addnote", addnote))
-    application.add_handler(CommandHandler("delnote", delnote))
+    application.add_handler(CommandHandler(["add", "addnote"], addnote))
+    application.add_handler(CommandHandler(["del", "delnote"], delnote))
     application.add_handler(CommandHandler("notes", notes))
     application.add_handler(ChatMemberHandler(track_group_membership, ChatMemberHandler.MY_CHAT_MEMBER))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
