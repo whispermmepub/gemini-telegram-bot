@@ -1096,31 +1096,12 @@ async def delnote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Note '{body}' ကို ဖျက်လိုက်ပြီ။")
 
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.message.text:
-        return
-
-    user = update.effective_user
-    if not user:
-        return
-
-    prompt = update.message.text.strip()
-    if not prompt:
-        return
-
-    if _is_group_chat(update):
-        _register_group_chat(update.effective_chat)
-
-    if _is_group_chat(update):
-        replied_to_bot = bool(
-            update.message.reply_to_message
-            and update.message.reply_to_message.from_user
-            and update.message.reply_to_message.from_user.is_bot
-        )
-        prompt = _extract_group_prompt(prompt) or (prompt if replied_to_bot else None)
-        if not prompt:
-            return
-
+async def _process_prompt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    prompt: str,
+    user,
+) -> None:
     faq_reply = _match_faq(prompt)
     if faq_reply:
         await _send_reply(update, context, faq_reply)
@@ -1211,6 +1192,53 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(_friendly_model_error(exc))
 
 
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text:
+        return
+    user = update.effective_user
+    if not user:
+        return
+    prompt = update.message.text.strip()
+    if not prompt:
+        return
+
+    if _is_group_chat(update):
+        _register_group_chat(update.effective_chat)
+
+    if _is_group_chat(update):
+        replied_to_bot = bool(
+            update.message.reply_to_message
+            and update.message.reply_to_message.from_user
+            and update.message.reply_to_message.from_user.is_bot
+        )
+        prompt = _extract_group_prompt(prompt) or (prompt if replied_to_bot else None)
+        if not prompt:
+            return
+
+    await _process_prompt(update, context, prompt, user)
+
+
+async def ask_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text:
+        return
+    user = update.effective_user
+    if not user:
+        return
+    prompt = re.sub(
+        r"^/ask(?:@\w+)?\s*", "", update.message.text, flags=re.IGNORECASE
+    ).strip()
+    if not prompt:
+        await update.message.reply_text(
+            "/ask မေးခွန်း လို့ရိုက်ပြီး မေးပါ။"
+        )
+        return
+
+    if _is_group_chat(update):
+        _register_group_chat(update.effective_chat)
+
+    await _process_prompt(update, context, prompt, user)
+
+
 async def post_init(application: Application) -> None:
     global BOT_USERNAME
     BOT_USERNAME = (application.bot.username or "").lstrip("@")
@@ -1220,6 +1248,7 @@ async def post_init(application: Application) -> None:
         BotCommand("reset", "Conversation history ဖျက်ရန်"),
         BotCommand("addnote", "Admin only: source or Q/A note ထည့်ရန်"),
         BotCommand("delnote", "Admin only: note ဖျက်ရန်"),
+        BotCommand("ask", "မေးခွန်းမေးရန် (/ask မေးခွန်း)"),
         BotCommand("notes", "Admin only: note list ကြည့်ရန်"),
     ]
     await application.bot.set_my_commands(commands)
@@ -1245,6 +1274,7 @@ def main() -> None:
     application.add_handler(CommandHandler("delnote", delnote))
     application.add_handler(CommandHandler("notes", notes))
     application.add_handler(ChatMemberHandler(track_group_membership, ChatMemberHandler.MY_CHAT_MEMBER))
+    application.add_handler(CommandHandler("ask", ask_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     if application.job_queue is None:
