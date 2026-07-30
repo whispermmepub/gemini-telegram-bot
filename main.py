@@ -230,6 +230,7 @@ def _current_group_ids() -> list[int]:
 
 
 async def _broadcast_to_groups(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    text = _widen_paragraphs(text)
     chat_ids = _current_group_ids()
     if not chat_ids:
         logger.info("No registered groups to broadcast to.")
@@ -965,9 +966,42 @@ def _generate_reply_sync(
     return "", None
 
 
+def _widen_paragraphs(text: str) -> str:
+    """Combine short lines within paragraphs so the Telegram message bubble renders wider."""
+    code_blocks: list[str] = []
+    def _stash(m: re.Match) -> str:
+        code_blocks.append(m.group(0))
+        return f"\x00CODE_{len(code_blocks)-1}\x00"
+    text = re.sub(r"```[\s\S]+?```", _stash, text)
+
+    paragraphs = re.split(r"\n\n+", text)
+    widened: list[str] = []
+    for para in paragraphs:
+        stripped = para.strip()
+        if not stripped:
+            continue
+        lines = stripped.split("\n")
+        is_list = any(
+            re.match(r"^(\s*[-*+] |\s*\d+[.)] |\s*> )", line)
+            for line in lines
+            if line.strip()
+        )
+        if is_list:
+            widened.append(stripped)
+        else:
+            combined = " ".join(line.strip() for line in lines if line.strip())
+            widened.append(combined)
+
+    result = "\n\n".join(widened)
+    for i, cb in enumerate(code_blocks):
+        result = result.replace(f"\x00CODE_{i}\x00", cb)
+    return result
+
+
 async def _send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     if not update.message:
         return
+    text = _widen_paragraphs(text)
     is_group = _is_group_chat(update)
     for part in _chunk_text(text):
         formatted = _format_telegram_html(part)
