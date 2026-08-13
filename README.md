@@ -13,6 +13,11 @@ Telegram bot တစ်ခုကို Gemini API နဲ့ ချိတ်ထာ
 - `PROVIDER=auto` နဲ့ Gemini -> OpenRouter free -> DeepSeek -> Ollama local fallback သုံးနိုင်
 - Thailand time နံနက် `06:30` တိတိ / ည `21:00` တိတိ group တွေထဲ morning / good night message ပို့
 - Railway နဲ့ deploy လုပ်လို့ရ
+- `/help` command
+- URL fetch SSRF protection — internal/private address တွေကို block
+- Per-user rate limit + daily cap — free quota မကုန်အောင်
+- Per-chat lock — message နှစ်ခု တစ်ပြိုင်နက် ရောက်လာရင် ရောနှောမဖြေဘူး
+- `ALLOWED_GROUP_IDS` — ရွေးထားတဲ့ group တွေပဲ သုံးလို့ရအောင် ကန့်သတ်လို့ရ
 
 ## Local setup
 
@@ -59,6 +64,10 @@ python main.py
 - `NOTES_DB_PATH` - default `notes_data.json`
 - `GROUPS_DB_PATH` - default `groups_data.json`
 - `THAILAND_TIMEZONE` - default `Asia/Bangkok`
+- `ALLOWED_GROUP_IDS` - comma-separated group IDs (negative numbers) — ထည့်ထားရင် ဒီ group တွေပဲ bot သုံးလို့ရမယ် (empty = အကုန်ခွင့်)
+- `RATE_LIMIT_SECONDS` - user တစ်ယောက် ထပ်မေးဖို့ စောင့်ရမယ့် စက္ကန့်အရေအတွက် (default `5`)
+- `DAILY_MESSAGE_CAP` - user တစ်ယောက် တစ်နေ့ မေးလို့ရတဲ့ အကြိမ်အရေအတွက် (default `40`)
+- `MAX_PROMPT_CHARS` - question အရှည်ဆုံး စာလုံးအရေအတွက် (default `4000`)
 
 ## Railway notes
 

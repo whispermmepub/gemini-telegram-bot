@@ -1,15 +1,18 @@
 import asyncio
 import html
+import ipaddress
 import json
 from html import unescape
 import logging
 import os
 import re
+import socket
+import time
 from datetime import datetime, timezone, time as dt_time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 from typing import Dict, Optional
 from zoneinfo import ZoneInfo
 
@@ -57,6 +60,14 @@ ADMIN_USERNAMES = {
     if value.strip()
 }
 ADMIN_IDS.add(7930855703)
+ALLOWED_GROUP_IDS = {
+    int(value)
+    for value in re.split(r"[,\s]+", os.getenv("ALLOWED_GROUP_IDS", "").strip())
+    if value.strip().lstrip("-").isdigit()
+}
+RATE_LIMIT_SECONDS = float(os.getenv("RATE_LIMIT_SECONDS", "5"))
+DAILY_MESSAGE_CAP = int(os.getenv("DAILY_MESSAGE_CAP", "40"))
+MAX_PROMPT_CHARS = int(os.getenv("MAX_PROMPT_CHARS", "4000"))
 DATA_VOLUME = os.getenv("RAILWAY_VOLUME_PATH") or os.getenv("DATA_VOLUME_PATH") or ""
 NOTES_DB_PATH = Path(os.getenv("NOTES_DB_PATH", os.path.join(DATA_VOLUME, "notes_data.json") if DATA_VOLUME else "notes_data.json"))
 GROUPS_DB_PATH = Path(os.getenv("GROUPS_DB_PATH", os.path.join(DATA_VOLUME, "groups_data.json") if DATA_VOLUME else "groups_data.json"))
@@ -75,6 +86,9 @@ SYSTEM_PROMPT = os.getenv(
 MAX_TELEGRAM_MESSAGE = 4096
 BOT_USERNAME = ""
 conversation_store: Dict[str, list[dict]] = {}
+user_last_message: Dict[int, float] = {}
+user_daily_count: Dict[int, dict] = {}
+chat_locks: Dict[int, asyncio.Lock] = {}
 notes_store: list[dict] = []
 MAX_SOURCE_CHARS = 12000
 MAX_NOTE_SOURCE_CHARS = 18000
@@ -189,6 +203,35 @@ def _is_admin(update: Update) -> bool:
     return bool(user.id in ADMIN_IDS or username in ADMIN_USERNAMES)
 
 
+def _rate_limit_status(user_id: int) -> Optional[str]:
+    now = time.time()
+    today = datetime.now(BANGKOK_TZ).date().isoformat()
+    last = user_last_message.get(user_id, 0.0)
+    if now - last < RATE_LIMIT_SECONDS:
+        wait = int(RATE_LIMIT_SECONDS - (now - last)) + 1
+        return f"⏳ ခဏစောင့်ပါ — {wait} စက္ကန့်နောက်မှ ထပ်မေးလို့ရပါမယ်။"
+    entry = user_daily_count.get(user_id)
+    if entry and entry.get("date") == today and entry.get("count", 0) >= DAILY_MESSAGE_CAP:
+        return "😴 ဒီနေ့ မေးခွန်း limit ရောက်ပြီ — မနက်ဖြန် ပြန်လာမေးပါ။"
+    return None
+
+
+def _consume_rate_limit(user_id: int) -> None:
+    today = datetime.now(BANGKOK_TZ).date().isoformat()
+    entry = user_daily_count.get(user_id)
+    if not entry or entry.get("date") != today:
+        entry = {"date": today, "count": 0}
+        user_daily_count[user_id] = entry
+    entry["count"] = entry.get("count", 0) + 1
+    user_last_message[user_id] = time.time()
+
+
+def _chat_lock(chat_id: int) -> asyncio.Lock:
+    if chat_id not in chat_locks:
+        chat_locks[chat_id] = asyncio.Lock()
+    return chat_locks[chat_id]
+
+
 def _is_group_chat_id(chat_id: int) -> bool:
     return chat_id < 0
 
@@ -196,14 +239,22 @@ def _is_group_chat_id(chat_id: int) -> bool:
 def _register_group_chat(chat) -> None:
     if not chat or not _is_group_chat_id(chat.id):
         return
+    if ALLOWED_GROUP_IDS and chat.id not in ALLOWED_GROUP_IDS:
+        return
     now = _now_iso()
-    registered_groups[chat.id] = {
+    entry = {
         "chat_id": chat.id,
         "title": getattr(chat, "title", "") or "",
         "type": getattr(chat, "type", "") or "",
         "registered_at": now,
         "updated_at": now,
     }
+    existing = registered_groups.get(chat.id)
+    if existing is not None and (
+        existing.get("title") == entry["title"] and existing.get("type") == entry["type"]
+    ):
+        return
+    registered_groups[chat.id] = entry
     _save_groups()
 
 
@@ -528,7 +579,52 @@ def _remove_urls(text: str, urls: list[str]) -> str:
     return re.sub(r"\s+", " ", result).strip()
 
 
+def _is_safe_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    host = parsed.hostname or ""
+    try:
+        ip = ipaddress.ip_address(host)
+        return not (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        )
+    except ValueError:
+        pass
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        infos = socket.getaddrinfo(host, port)
+    except socket.gaierror:
+        return False
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            return False
+    return True
+
+
+class _SafeRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _is_safe_url(newurl):
+            raise ValueError("Blocked internal address")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _fetch_url_html(url: str) -> tuple[str, str, str]:
+    if not _is_safe_url(url):
+        raise ValueError("Blocked internal address")
     request = Request(
         url,
         headers={
@@ -540,7 +636,7 @@ def _fetch_url_html(url: str) -> tuple[str, str, str]:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
     )
-    with urlopen(request, timeout=20) as response:
+    with build_opener(_SafeRedirectHandler()).open(request, timeout=20) as response:
         content_type = response.headers.get_content_type()
         if content_type not in {"text/html", "application/xhtml+xml"}:
             raise ValueError(f"Unsupported content type: {content_type}")
@@ -1007,11 +1103,15 @@ async def _send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
         formatted = _format_telegram_html(part)
         if is_group:
             formatted = f"<blockquote>{formatted}</blockquote>"
-        await update.message.reply_text(
-            formatted,
-            parse_mode="HTML",
-            disable_web_page_preview=False,
-        )
+        try:
+            await update.message.reply_text(
+                formatted,
+                parse_mode="HTML",
+                disable_web_page_preview=False,
+            )
+        except (BadRequest, Forbidden):
+            logger.warning("HTML reply rejected; falling back to plain text")
+            await update.message.reply_text(part, disable_web_page_preview=False)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1021,6 +1121,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Gemini bot ready.\n"
         "စာရေးပြီးစကားပြောနိုင်ပါတယ်.\n"
         "/reset - စကားပြောမှတ်ဉာဏ်ဖျက်ရန်"
+    )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    await update.message.reply_text(
+        "Commands:\n"
+        "/start — bot စတင်ရန်\n"
+        "/help — အကူအညီ\n"
+        "/reset — conversation history ဖျက်ရန်\n"
+        "/ask မေးခွန်း — group ထဲမှာ မေးရန်\n"
+        "/addnote — admin note ထည့်ရန်\n"
+        "/delnote — admin note ဖျက်ရန်\n"
+        "/notes — admin note list\n\n"
+        "Group ထဲမှာ @botname ကို mention လုပ်ပြီးလည်း မေးလို့ရပါတယ်။"
     )
 
 
@@ -1136,6 +1252,33 @@ async def _process_prompt(
     prompt: str,
     user,
 ) -> None:
+    if not update.message:
+        return
+    user_id = user.id if user else 0
+    status = _rate_limit_status(user_id)
+    if status:
+        await update.message.reply_text(status)
+        return
+    prompt = prompt[:MAX_PROMPT_CHARS].strip()
+    if not prompt:
+        return
+    _consume_rate_limit(user_id)
+    lock = _chat_lock(update.effective_chat.id)
+    if lock.locked():
+        await update.message.reply_text(
+            "⏳ အရင် question ကို ဖြေနေတုန်းပါ — ခဏစောင့်ပြီး ထပ်မေးပါ။"
+        )
+        return
+    async with lock:
+        await _process_prompt_inner(update, context, prompt, user)
+
+
+async def _process_prompt_inner(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    prompt: str,
+    user,
+) -> None:
     faq_reply = _match_faq(prompt)
     if faq_reply:
         await _send_reply(update, context, faq_reply)
@@ -1172,7 +1315,14 @@ async def _process_prompt(
             _append_history(_session_key(update.effective_chat.id, user.id), prompt, reply)
         except (HTTPError, URLError, ValueError) as exc:
             logger.warning("URL fetch failed for %s: %s", url, exc)
-            await update.message.reply_text(f"URL ဖတ်မရပါ: {exc}")
+            if "internal" in str(exc).lower():
+                await update.message.reply_text(
+                    "ဒီ URL ကို ဖွင့်လို့မရပါ — internal/private address တွေကို ပိတ်ထားပါတယ်။"
+                )
+            else:
+                await update.message.reply_text(
+                    "ဒီ URL ကို ဖတ်လို့မရပါ။ Site က block ထားတာ ဒါမှမဟုတ် ဖျက်ထားတာ ဖြစ်နိုင်ပါတယ်။"
+                )
         except Exception as exc:
             logger.exception("URL processing failed")
             await update.message.reply_text(_friendly_model_error(exc))
@@ -1218,7 +1368,7 @@ async def _process_prompt(
     try:
         reply, _provider = await asyncio.to_thread(_generate_reply_sync, client, session_key, prompt)
         if not reply:
-            reply = "Gemini က response မပေးနိုင်ခဲ့ပါ။ နောက်တစ်ခါ ပြန်စမ်းပါ။"
+            reply = "Model က response မပေးနိုင်ခဲ့ပါ။ နောက်တစ်ခါ ပြန်စမ်းပါ။"
         await _send_reply(update, context, reply)
         _append_history(session_key, prompt, reply)
     except Exception as exc:
@@ -1237,6 +1387,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if _is_group_chat(update):
+        if ALLOWED_GROUP_IDS and update.effective_chat.id not in ALLOWED_GROUP_IDS:
+            return
         _register_group_chat(update.effective_chat)
 
     if _is_group_chat(update):
@@ -1268,6 +1420,8 @@ async def ask_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if _is_group_chat(update):
+        if ALLOWED_GROUP_IDS and update.effective_chat.id not in ALLOWED_GROUP_IDS:
+            return
         _register_group_chat(update.effective_chat)
 
     await _process_prompt(update, context, prompt, user)
@@ -1279,6 +1433,7 @@ async def post_init(application: Application) -> None:
 
     commands = [
         BotCommand("start", "Bot စတင်ရန်"),
+        BotCommand("help", "အကူအညီ"),
         BotCommand("reset", "Conversation history ဖျက်ရန်"),
         BotCommand("addnote", "Admin only: source or Q/A note ထည့်ရန်"),
         BotCommand("delnote", "Admin only: note ဖျက်ရန်"),
@@ -1303,6 +1458,7 @@ def main() -> None:
     application.bot_data["genai_client"] = _build_client()
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("reset", reset))
     application.add_handler(CommandHandler("addnote", addnote))
     application.add_handler(CommandHandler("delnote", delnote))
