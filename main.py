@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone, time as dt_time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 from typing import Dict, Optional
 from zoneinfo import ZoneInfo
@@ -68,6 +68,11 @@ ALLOWED_GROUP_IDS = {
 RATE_LIMIT_SECONDS = float(os.getenv("RATE_LIMIT_SECONDS", "5"))
 DAILY_MESSAGE_CAP = int(os.getenv("DAILY_MESSAGE_CAP", "40"))
 MAX_PROMPT_CHARS = int(os.getenv("MAX_PROMPT_CHARS", "4000"))
+WEB_SEARCH = os.getenv("WEB_SEARCH", "1").strip().lower() not in {"0", "false", "off", "no", ""}
+WEB_SEARCH_RESULTS = int(os.getenv("WEB_SEARCH_RESULTS", "5"))
+WEB_SEARCH_PAGES = int(os.getenv("WEB_SEARCH_PAGES", "2"))
+GOOGLE_CSE_API_KEY = os.getenv("GOOGLE_CSE_API_KEY", "").strip()
+GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID", "").strip()
 DATA_VOLUME = os.getenv("RAILWAY_VOLUME_PATH") or os.getenv("DATA_VOLUME_PATH") or ""
 NOTES_DB_PATH = Path(os.getenv("NOTES_DB_PATH", os.path.join(DATA_VOLUME, "notes_data.json") if DATA_VOLUME else "notes_data.json"))
 GROUPS_DB_PATH = Path(os.getenv("GROUPS_DB_PATH", os.path.join(DATA_VOLUME, "groups_data.json") if DATA_VOLUME else "groups_data.json"))
@@ -120,6 +125,13 @@ SOURCE_SYSTEM_PROMPT = (
     "Do not invent facts. "
     "If the user did not ask a specific question, give a concise summary of the page. "
     "Reply in the same language as the user."
+)
+
+WEB_SEARCH_SYSTEM_PROMPT = (
+    "You answer questions using the provided web search results and page sources. "
+    "If the sources do not contain the answer, say so clearly instead of inventing facts. "
+    "Reply in the same language as the user (Burmese by default), naturally and concisely. "
+    "Prefer recent and relevant results when they conflict."
 )
 
 FAQ_RESPONSES = [
@@ -577,6 +589,117 @@ def _remove_urls(text: str, urls: list[str]) -> str:
     for url in urls:
         result = result.replace(url, " ")
     return re.sub(r"\s+", " ", result).strip()
+
+
+def _clean_search_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip())
+
+
+def _search_google_cse(query: str, max_results: int) -> list[dict]:
+    if not GOOGLE_CSE_API_KEY or not GOOGLE_CSE_ID:
+        return []
+    params = urlencode({
+        "key": GOOGLE_CSE_API_KEY,
+        "cx": GOOGLE_CSE_ID,
+        "q": query,
+        "num": min(max_results, 10),
+    })
+    request = Request(
+        f"https://www.googleapis.com/customsearch/v1?{params}",
+        headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"},
+    )
+    try:
+        with urlopen(request, timeout=20) as response:
+            data = json.loads(response.read().decode("utf-8", errors="replace"))
+        results = []
+        for item in data.get("items", [])[:max_results]:
+            title = _clean_search_text(item.get("title"))
+            link = (item.get("link") or "").strip()
+            if not title or not link:
+                continue
+            results.append({
+                "title": title,
+                "snippet": _clean_search_text(item.get("snippet"))[:300] or "Google result",
+                "url": link,
+            })
+        return results
+    except Exception as exc:
+        logger.warning("Google CSE search failed: %s", exc)
+        return []
+
+
+def _search_duckduckgo(query: str, max_results: int) -> list[dict]:
+    request = Request(
+        "https://html.duckduckgo.com/html/",
+        data=urlencode({"q": query}).encode("utf-8"),
+        headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=20) as response:
+            html = response.read().decode("utf-8", errors="replace")
+    except Exception as exc:
+        logger.warning("DuckDuckGo search failed: %s", exc)
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    results = []
+    for node in soup.select(".result"):
+        link = node.select_one(".result__a")
+        if not link:
+            continue
+        title = _clean_search_text(link.get_text())
+        href = (link.get("href") or "").strip()
+        if "uddg=" in href:
+            try:
+                href = parse_qs(urlparse(href).query).get("uddg", [href])[0]
+            except Exception:
+                pass
+        if not href.startswith(("http://", "https://")):
+            continue
+        snippet_node = node.select_one(".result__snippet")
+        snippet = _clean_search_text(snippet_node.get_text()) if snippet_node else ""
+        results.append({
+            "title": title,
+            "snippet": snippet[:300],
+            "url": href,
+        })
+        if len(results) >= max_results:
+            break
+    return results
+
+
+def _search_web(query: str, max_results: int = WEB_SEARCH_RESULTS) -> list[dict]:
+    if GOOGLE_CSE_API_KEY and GOOGLE_CSE_ID:
+        results = _search_google_cse(query, max_results)
+        if results:
+            return results
+    return _search_duckduckgo(query, max_results)
+
+
+def _should_web_search(prompt: str) -> bool:
+    if not WEB_SEARCH:
+        return False
+    text = prompt.strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    markers = (
+        "?", "ဘာ", "ဘယ်", "ဘယ္", "ဘယ့်", "ဘယ်လို", "ဘယ္လို", "ဘယ်နှ", "ဘယ်လောက်",
+        "ဘယ္ေလာက္", "ဆိုတာ", "လား", "လဲ", "လော", "ရလား", "ရပါလား",
+        "when", "what", "who", "where", "why", "which", "how",
+        "latest", "news", "today", "price", "weather", "forecast", "score", "result",
+    )
+    if any(marker in lowered for marker in markers):
+        return True
+    return len(text.split()) >= 6
+
+
+def _build_search_prompt(user_prompt: str, context_text: str) -> str:
+    return f"User question:\n{user_prompt}\n\n{context_text}"
 
 
 def _is_safe_url(url: str) -> bool:
@@ -1114,6 +1237,75 @@ async def _send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
             await update.message.reply_text(part, disable_web_page_preview=False)
 
 
+async def _answer_with_web_search(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, user
+) -> bool:
+    """Search the web, read the best sources, and reply with a grounded answer."""
+    if not update.message:
+        return False
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id, action=ChatAction.TYPING
+    )
+    results = await asyncio.to_thread(_search_web, prompt, WEB_SEARCH_RESULTS)
+    if not results:
+        return False
+
+    lines = ["Web search results:"]
+    for index, result in enumerate(results, 1):
+        snippet = result.get("snippet") or ""
+        lines.append(
+            f"{index}. {result.get('title', 'Untitled')}\n"
+            f"   URL: {result.get('url', '')}\n"
+            f"   {snippet[:400]}"
+        )
+
+    page_blocks = []
+    for result in results[:WEB_SEARCH_PAGES]:
+        try:
+            page_html, final_url, _ = await asyncio.to_thread(_fetch_url_html, result.get("url", ""))
+            page_title, _description, source_text = await asyncio.to_thread(
+                _extract_main_text_from_html, page_html
+            )
+            if source_text:
+                page_blocks.append(
+                    f"Source ({page_title or final_url}):\n"
+                    f"{_summarize_source_text(source_text, MAX_SOURCE_CHARS)}"
+                )
+        except Exception as exc:
+            logger.warning(
+                "Search result page fetch failed for %s: %s", result.get("url", ""), exc
+            )
+    if page_blocks:
+        lines.append("\n\n".join(page_blocks))
+
+    context_text = "\n\n".join(lines)
+    search_prompt = _build_search_prompt(prompt, context_text)
+    client = context.application.bot_data.get("genai_client")
+    if client is None:
+        return False
+
+    try:
+        reply, _provider = await asyncio.to_thread(
+            _generate_reply_sync,
+            client,
+            _session_key(update.effective_chat.id, user.id),
+            search_prompt,
+            WEB_SEARCH_SYSTEM_PROMPT,
+            False,
+        )
+    except Exception as exc:
+        logger.exception("Web search answer failed")
+        await update.message.reply_text(_friendly_model_error(exc))
+        return True
+
+    if not reply:
+        reply = "Internet ကနေ ရှာတွေ့တဲ့ အချက်အလက်ပေါ်မူတည်ပြီး အဖြေ မထုတ်နိုင်ခဲ့ပါ။"
+    sources = "\n".join(f"- {result.get('url', '')}" for result in results[:WEB_SEARCH_RESULTS])
+    await _send_reply(update, context, f"{reply}\n\nSources:\n{sources}")
+    _append_history(_session_key(update.effective_chat.id, user.id), prompt, reply)
+    return True
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
@@ -1359,6 +1551,10 @@ async def _process_prompt_inner(
             await update.message.reply_text(_friendly_model_error(exc))
             return
 
+    if _should_web_search(prompt):
+        if await _answer_with_web_search(update, context, prompt, user):
+            return
+
     session_key = _session_key(update.effective_chat.id, user.id)
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
@@ -1427,6 +1623,29 @@ async def ask_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await _process_prompt(update, context, prompt, user)
 
 
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text:
+        return
+    user = update.effective_user
+    if not user:
+        return
+    prompt = re.sub(
+        r"^/search(?:@\w+)?\s*", "", update.message.text, flags=re.IGNORECASE
+    ).strip()
+    if not prompt:
+        await update.message.reply_text(
+            "/search မေးခွန်း လို့ရိုက်ပြီး internet ကရှာပြီး မေးပါ။"
+        )
+        return
+    if _is_group_chat(update):
+        if ALLOWED_GROUP_IDS and update.effective_chat.id not in ALLOWED_GROUP_IDS:
+            return
+        _register_group_chat(update.effective_chat)
+    if await _answer_with_web_search(update, context, prompt, user):
+        return
+    await _process_prompt(update, context, prompt, user)
+
+
 async def post_init(application: Application) -> None:
     global BOT_USERNAME
     BOT_USERNAME = (application.bot.username or "").lstrip("@")
@@ -1438,6 +1657,7 @@ async def post_init(application: Application) -> None:
         BotCommand("addnote", "Admin only: source or Q/A note ထည့်ရန်"),
         BotCommand("delnote", "Admin only: note ဖျက်ရန်"),
         BotCommand("ask", "မေးခွန်းမေးရန် (/ask မေးခွန်း)"),
+        BotCommand("search", "Internet ကရှာပြီး ဖြေရန် (/search မေးခွန်း)"),
         BotCommand("notes", "Admin only: note list ကြည့်ရန်"),
     ]
     await application.bot.set_my_commands(commands)
@@ -1465,6 +1685,7 @@ def main() -> None:
     application.add_handler(CommandHandler("notes", notes))
     application.add_handler(ChatMemberHandler(track_group_membership, ChatMemberHandler.MY_CHAT_MEMBER))
     application.add_handler(CommandHandler("ask", ask_handler))
+    application.add_handler(CommandHandler("search", search_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     if application.job_queue is None:

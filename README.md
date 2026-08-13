@@ -10,6 +10,7 @@ Telegram bot တစ်ခုကို Gemini API နဲ့ ချိတ်ထာ
 - Group ထဲမှာ `@botusername` mention လုပ်ရုံနဲ့ reply ပြန်ပေး
 - Bot ကို group admin ပေးထားပြီး သုံးနိုင်
 - URL ပို့ရင် page ထဲက main article text ကိုဖတ်ပြီး source-based answer ပေး
+- မေးခွန်းတွေကို internet ကနေ ရှာဖတ်ပြီး source-based answer ပေး (Gemini app လိုမျိုး) — `/search မေးခွန်း` နဲ့လည်း ရတယ်
 - `PROVIDER=auto` နဲ့ Gemini -> OpenRouter free -> DeepSeek -> Ollama local fallback သုံးနိုင်
 - Thailand time နံနက် `06:30` တိတိ / ည `21:00` တိတိ group တွေထဲ morning / good night message ပို့
 - Railway နဲ့ deploy လုပ်လို့ရ
@@ -68,6 +69,10 @@ python main.py
 - `RATE_LIMIT_SECONDS` - user တစ်ယောက် ထပ်မေးဖို့ စောင့်ရမယ့် စက္ကန့်အရေအတွက် (default `5`)
 - `DAILY_MESSAGE_CAP` - user တစ်ယောက် တစ်နေ့ မေးလို့ရတဲ့ အကြိမ်အရေအတွက် (default `40`)
 - `MAX_PROMPT_CHARS` - question အရှည်ဆုံး စာလုံးအရေအတွက် (default `4000`)
+- `WEB_SEARCH` - web search ဖွင့်/ပိတ် (`1` default, `0` ဆို ပိတ်)
+- `WEB_SEARCH_RESULTS` - search result အရေအတွက် (default `5`)
+- `WEB_SEARCH_PAGES` - result တွေထဲက ဘယ်နှ page ကို ဖတ်ပြီး အဖြေထုတ်မယ် (default `2`)
+- `GOOGLE_CSE_API_KEY` / `GOOGLE_CSE_ID` - ထည့်ထားရင် Google Custom Search (free tier) သုံးမယ်၊ မရှိရင် DuckDuckGo (free, key မလို) ကို အလိုအလျောက် fallback
 
 ## Railway notes
 
@@ -106,6 +111,21 @@ Data structure:
 ```
 
 Note: `GROUPS_DB_PATH` / `NOTES_DB_PATH` env var တွေနဲ့ သီးသန့်လမ်းကြောင်းသတ်မှတ်လည်းရပါတယ်။
+
+## Web search (internet ကရှာဖြေ)
+
+Gemini app လိုပဲ မေးခွန်းတွေကို internet ကနေ ရှာဖတ်ပြီး အဖြေပေးပါတယ်:
+
+1. မေးခွန်းက question ပုံစံဖြစ်ရင် (ဘယ်/ဘာ/how/what/weather/latest စသည်) အလိုအလျောက် search လုပ်ပါတယ်
+2. Search results (ထိပ်ဆုံး `WEB_SEARCH_RESULTS` ခု) ကို ယူပြီး ထိပ်ဆုံး `WEB_SEARCH_PAGES` ခုရဲ့ page content ကိုပါ ဖတ်ပါတယ်
+3. အဲဒီ sources ပေါ်မူတည်ပြီး answer ထုတ်ပြီး အောက်မှာ `Sources:` နဲ့ link တွေ ပါပေးပါတယ်
+4. `/search မေးခွန်း` ဆိုပြီးတော့လည်း အမြဲ search လုပ်ဖို့ တိုက်ရိုက် ခိုင်းလို့ရတယ်
+
+Search provider:
+- `GOOGLE_CSE_API_KEY` + `GOOGLE_CSE_ID` ထည့်ထားရင် Google Custom Search (free tier ~100/day) သုံးမယ်
+- မရှိရင် DuckDuckGo HTML search (free, API key မလို) ကို fallback သုံးတယ်
+
+သတိထားရန်: search မတွေ့ရင် ပုံမှန် model answer ပဲ ပြန်ပေးပါတယ်။ Sources ကနေ မဖြေနိုင်ရင် "ရှာမတွေ့ပါ" လို့ ပြောပါတယ်။
 
 ## Group usage
 
