@@ -52,7 +52,7 @@ python main.py
 - `GEMINI_MODEL` - default `gemini-3.6-flash`
 - `SYSTEM_PROMPT` - bot ရဲ့ style ပြောင်းချင်ရင်
 - `PROVIDER` - default `auto`
-- `PROVIDER_ORDER` - default `gemini,openrouter_free,deepseek,ollama`
+- `PROVIDER_ORDER` - default `gemini,openrouter_free,deepseek,hf,ollama`
 - `OPENROUTER_API_KEY`
 - `OPENROUTER_MODEL` - default `openrouter/free`
 - `OPENROUTER_REFERER`
@@ -60,6 +60,10 @@ python main.py
 - `DEEPSEEK_API_KEY`
 - `DEEPSEEK_MODEL` - default `deepseek-chat`
 - `DEEPSEEK_BASE_URL` - default `https://api.deepseek.com`
+- `HF_API_KEY` - Hugging Face access token ([huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)) — `hf` provider သုံးဖို့ လို
+- `HF_MODEL` - default `DavidAU/Qwen3.5-9B-Claude-4.6-HighIQ-THINKING-HERETIC-UNCENSORED` (OpenAI-compatible chat model ID)
+- `HF_BASE_URL` - default `https://api-inference.huggingface.co/v1` (HF Inference API)
+- `HF_MAX_TOKENS` - default `2048`
 - `OLLAMA_BASE_URL` - default `http://localhost:11434`
 - `OLLAMA_MODEL` - default `llama3.1:8b`
 - `NOTES_DB_PATH` - default `notes_data.json`
@@ -195,3 +199,16 @@ Admin-only commands:
 
 `SYSTEM_PROMPT` ကိုပြောင်းပြီး bot personality ကိုညှိနိုင်ပါတယ်။
 `GEMINI_MODEL` ကိုပြောင်းပြီး model ကိုလည်း လိုသလိုရွေးနိုင်ပါတယ်။
+
+
+## Hugging Face (hf) provider — Qwen3.5-9B
+
+Hugging Face Inference API ကို သုံးပြီး ကိုယ့်စက်မှာ GPU မလိုဘဲ စာသား သီးသန့် Q&A သုံးနိုင်ပါတယ်။
+(hf.co မှာ serverless inference ဖွင့်ထားတဲ့ OpenAI-compatible model အကုန် သုံးလို့ရပါတယ်။)
+
+1. [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) မှာ free token ယူပါ။
+2. Variables ထဲထည့်ပါ:
+   - `HF_API_KEY` = token
+   - `HF_MODEL` = `DavidAU/Qwen3.5-9B-Claude-4.6-HighIQ-THINKING-HERETIC-UNCENSORED`
+   - `PROVIDER=hf` (ဒီ model တစ်ခုတည်းပဲ သုံးချင်ရင်) ဒါမှမဟုတ် `PROVIDER_ORDER` ထဲ `hf` ထည့်ထားရင် fallback chain အနေနဲ့လည်း ရတယ်။
+3. Cold start (ပထမဆုံး request) မှာ model ကို ဖွင့်နေလို့ 1-2 မိနစ် ကြာတတ်ပါတယ်။ Free tier မှာ rate limit ရှိပြီး သုံးသူများချိန်မှာ queue ရှိနိုင်ပါတယ်။

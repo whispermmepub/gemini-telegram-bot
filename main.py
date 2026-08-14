@@ -43,10 +43,14 @@ DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip()
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b").strip()
+HF_API_KEY = os.getenv("HF_API_KEY", "").strip()
+HF_MODEL = os.getenv("HF_MODEL", "DavidAU/Qwen3.5-9B-Claude-4.6-HighIQ-THINKING-HERETIC-UNCENSORED").strip()
+HF_BASE_URL = os.getenv("HF_BASE_URL", "https://api-inference.huggingface.co/v1").rstrip("/")
+HF_MAX_TOKENS = int(os.getenv("HF_MAX_TOKENS", "2048"))
 PROVIDER = os.getenv("PROVIDER", "auto").strip().lower()
 PROVIDER_ORDER = [
     item.strip().lower()
-    for item in os.getenv("PROVIDER_ORDER", "gemini,openrouter_free,deepseek,ollama").split(",")
+    for item in os.getenv("PROVIDER_ORDER", "gemini,openrouter_free,deepseek,hf,ollama").split(",")
     if item.strip()
 ]
 ADMIN_IDS = {
@@ -970,6 +974,8 @@ def _normalize_provider_name(provider: str) -> str:
         return "openrouter_free"
     if value in {"deepseek", "deepseek_api"}:
         return "deepseek"
+    if value in {"hf", "huggingface", "hugging_face", "huggingface_api"}:
+        return "hf"
     if value in {"ollama", "local", "local_ollama"}:
         return "ollama"
     if value in {"gemini", "google"}:
@@ -986,7 +992,7 @@ def _provider_chain() -> list[str]:
         provider = _normalize_provider_name(item)
         if provider not in chain:
             chain.append(provider)
-    return chain or ["gemini", "openrouter_free", "ollama"]
+    return chain or ["gemini", "openrouter_free", "deepseek", "hf", "ollama"]
 
 
 def _append_history(session_key: str, user_text: str, assistant_text: str) -> None:
@@ -1103,6 +1109,26 @@ def _call_deepseek_sync(system_prompt: str, prompt: str) -> str:
     return _extract_openrouter_content(data)
 
 
+def _call_hf_sync(system_prompt: str, prompt: str) -> str:
+    if not HF_API_KEY:
+        raise RuntimeError("HF_API_KEY not set")
+    headers = {
+        "Authorization": f"Bearer {HF_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": HF_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False,
+        "max_tokens": HF_MAX_TOKENS,
+    }
+    data = _post_json(f"{HF_BASE_URL}/chat/completions", payload, headers=headers, timeout=180)
+    return _extract_openrouter_content(data)
+
+
 def _call_ollama_sync(system_prompt: str, prompt: str) -> str:
     payload = {
         "model": OLLAMA_MODEL,
@@ -1167,6 +1193,8 @@ def _generate_reply_sync(
                 reply = _call_openrouter_sync(system_prompt, prompt_to_send)
             elif provider == "deepseek":
                 reply = _call_deepseek_sync(system_prompt, prompt_to_send)
+            elif provider == "hf":
+                reply = _call_hf_sync(system_prompt, prompt_to_send)
             elif provider == "ollama":
                 reply = _call_ollama_sync(system_prompt, prompt_to_send)
             else:
