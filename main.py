@@ -20,7 +20,7 @@ from bs4 import BeautifulSoup
 from google import genai
 from telegram import BotCommand, Update
 from telegram.constants import ChatAction
-from telegram.error import BadRequest, Forbidden
+from telegram.error import BadRequest, Conflict, Forbidden
 from telegram.ext import Application, ChatMemberHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 
