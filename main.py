@@ -80,6 +80,7 @@ GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID", "").strip()
 DATA_VOLUME = os.getenv("RAILWAY_VOLUME_PATH") or os.getenv("DATA_VOLUME_PATH") or ""
 NOTES_DB_PATH = Path(os.getenv("NOTES_DB_PATH", os.path.join(DATA_VOLUME, "notes_data.json") if DATA_VOLUME else "notes_data.json"))
 GROUPS_DB_PATH = Path(os.getenv("GROUPS_DB_PATH", os.path.join(DATA_VOLUME, "groups_data.json") if DATA_VOLUME else "groups_data.json"))
+ALLOWED_USERS_DB_PATH = Path(os.getenv("ALLOWED_USERS_DB_PATH", os.path.join(DATA_VOLUME, "allowed_users.json") if DATA_VOLUME else "allowed_users.json"))
 BANGKOK_TZ = ZoneInfo(os.getenv("THAILAND_TIMEZONE", "Asia/Bangkok"))
 
 SYSTEM_PROMPT = os.getenv(
@@ -95,6 +96,7 @@ SYSTEM_PROMPT = os.getenv(
 MAX_TELEGRAM_MESSAGE = 4096
 BOT_USERNAME = ""
 conversation_store: Dict[str, list[dict]] = {}
+allowed_users: Dict[str, dict] = {}
 user_last_message: Dict[int, float] = {}
 user_daily_count: Dict[int, dict] = {}
 chat_locks: Dict[int, asyncio.Lock] = {}
@@ -387,6 +389,79 @@ def _load_groups() -> None:
 def _save_groups() -> None:
     payload = list(registered_groups.values())
     GROUPS_DB_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_allowed_users() -> None:
+    global allowed_users
+    if not ALLOWED_USERS_DB_PATH.exists():
+        allowed_users = {}
+        return
+    try:
+        with ALLOWED_USERS_DB_PATH.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        users: Dict[str, dict] = {}
+        if isinstance(payload, dict):
+            raw = payload.get("users", {})
+        elif isinstance(payload, list):
+            raw = {str(item.get("user_id", "")): item for item in payload if isinstance(item, dict)}
+        else:
+            raw = {}
+        for key, value in raw.items():
+            entry = value if isinstance(value, dict) else {}
+            users[str(key)] = {
+                "username": str(entry.get("username", "")).strip().lstrip("@").lower(),
+                "added_by": entry.get("added_by"),
+                "added_at": entry.get("added_at") or _now_iso(),
+            }
+        allowed_users = users
+    except Exception as exc:
+        logger.warning("Failed to load allowed users DB: %s", exc)
+        allowed_users = {}
+
+
+def _save_allowed_users() -> None:
+    ALLOWED_USERS_DB_PATH.write_text(
+        json.dumps({"users": allowed_users}, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _is_allowed_user(user) -> bool:
+    if not user:
+        return False
+    user_id = getattr(user, "id", None)
+    username = ((getattr(user, "username", "") or "").lstrip("@")).lower()
+    if user_id in ADMIN_IDS or username in ADMIN_USERNAMES:
+        return True
+    if user_id is not None and str(user_id) in allowed_users:
+        return True
+    if username:
+        for uid, entry in allowed_users.items():
+            if str(entry.get("username", "")).lower() == username:
+                if user_id is not None:
+                    entry["user_id"] = user_id
+                    allowed_users[str(user_id)] = entry
+                    if str(user_id) != uid:
+                        allowed_users.pop(uid, None)
+                    _save_allowed_users()
+                return True
+    return False
+
+
+def _parse_allow_target(text: str) -> tuple[Optional[int], Optional[str]]:
+    body = re.sub(r"^/\w+(?:@\w+)?\s*", "", text, flags=re.IGNORECASE).strip()
+    token = body.split()[0] if body else ""
+    if not token:
+        return None, None
+    if token.lstrip("-").isdigit():
+        return int(token), None
+    username = token.lstrip("@").lower()
+    return None, username or None
+
+
+def _allowlist_key(resolved_id: Optional[int], username: Optional[str]) -> str:
+    if resolved_id is not None:
+        return str(resolved_id)
+    return f"@{username}" if username else ""
 
 
 def _normalize_space_lower(text: str) -> str:
@@ -1334,6 +1409,116 @@ async def _answer_with_web_search(
     return True
 
 
+async def allow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not _is_admin(update):
+        await update.message.reply_text("ဒီ command ကို admin ပဲ သုံးလို့ရပါတယ်။")
+        return
+    user_id, username = _parse_allow_target(update.message.text or "")
+    if user_id is None and username is None:
+        await update.message.reply_text(
+            "အသုံးပြုပုံ:\n"
+            "/allow @telegramusername\n"
+            "/allow 123456789"
+        )
+        return
+
+    resolved_id = user_id
+    if resolved_id is None and username:
+        try:
+            chat = await context.bot.get_chat(username)
+            if chat is not None and getattr(chat, "id", None) is not None:
+                resolved_id = chat.id
+        except Exception as exc:
+            logger.info("Could not resolve @%s to user id: %s", username, exc)
+
+    entry = None
+    if resolved_id is not None:
+        entry = allowed_users.get(str(resolved_id))
+    if entry is None and username:
+        for uid, item in allowed_users.items():
+            if str(item.get("username", "")).lower() == username:
+                entry = item
+                resolved_id = int(uid) if uid.lstrip("-").isdigit() else None
+                break
+    if entry is None:
+        entry = {
+            "username": username or "",
+            "user_id": resolved_id,
+            "added_by": update.effective_user.id if update.effective_user else None,
+            "added_at": _now_iso(),
+        }
+    elif resolved_id is not None:
+        entry["user_id"] = resolved_id
+    if username:
+        entry["username"] = username
+    key = _allowlist_key(resolved_id, username)
+    allowed_users[key] = entry
+    for uid in list(allowed_users.keys()):
+        if uid == key:
+            continue
+        item = allowed_users[uid]
+        if username and str(item.get("username", "")).lower() == username:
+            allowed_users.pop(uid, None)
+        elif resolved_id is not None and str(item.get("user_id", "")).isdigit() and int(item.get("user_id")) == resolved_id:
+            allowed_users.pop(uid, None)
+    _save_allowed_users()
+
+    label = f"@{entry.get('username')}" if entry.get("username") else f"ID {resolved_id}"
+    await update.message.reply_text(f"✅ {label} ကို bot သုံးခွင့် ပေးလိုက်ပါပြီ။")
+
+
+async def disallow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not _is_admin(update):
+        await update.message.reply_text("ဒီ command ကို admin ပဲ သုံးလို့ရပါတယ်။")
+        return
+    user_id, username = _parse_allow_target(update.message.text or "")
+    if user_id is None and username is None:
+        await update.message.reply_text(
+            "အသုံးပြုပုံ:\n/disallow @telegramusername\n/disallow 123456789"
+        )
+        return
+
+    removed: list[str] = []
+    if user_id is not None:
+        key = str(user_id)
+        if key in allowed_users:
+            allowed_users.pop(key, None)
+            removed.append(f"ID {user_id}")
+    if username:
+        for uid in list(allowed_users.keys()):
+            if str(allowed_users[uid].get("username", "")).lower() == username:
+                allowed_users.pop(uid, None)
+                removed.append(f"@{username}")
+    if not removed:
+        await update.message.reply_text("ဒီ user က allow list ထဲ မရှိပါဘူး။")
+        return
+    _save_allowed_users()
+    await update.message.reply_text(f"🚫 {', '.join(removed)} ကို bot သုံးခွင့် ရုပ်သိမ်းလိုက်ပါပြီ။")
+
+
+async def allowlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not _is_admin(update):
+        await update.message.reply_text("ဒီ command ကို admin ပဲ သုံးလို့ရပါတယ်။")
+        return
+    if not allowed_users:
+        await update.message.reply_text("Allow list ထဲ user မရှိသေးပါ။ /allow နဲ့ ထည့်ပါ။")
+        return
+    lines = ["Allowed users:"]
+    for key, entry in allowed_users.items():
+        username = entry.get("username") or ""
+        user_id = entry.get("user_id") or key
+        label = f"@{username}" if username else f"ID {user_id}"
+        added_at = str(entry.get("added_at", ""))[:19]
+        lines.append(f"- {label} (added {added_at})")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
@@ -1353,6 +1538,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/help — အကူအညီ\n"
         "/reset — conversation history ဖျက်ရန်\n"
         "/ask မေးခွန်း — group ထဲမှာ မေးရန်\n"
+        "/allow @username / ID — admin only: user သုံးခွင့်ပေးရန်\n"
+        "/disallow — admin only: user သုံးခွင့်ရုပ်သိမ်းရန်\n"
+        "/allowlist — admin only: သုံးခွင့်ရထားသူ list\n"
         "/addnote — admin note ထည့်ရန်\n"
         "/delnote — admin note ဖျက်ရန်\n"
         "/notes — admin note list\n\n"
@@ -1610,6 +1798,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not prompt:
         return
 
+    if not _is_allowed_user(user):
+        await update.message.reply_text(
+            "⛔ ဒီ bot ကို သုံးခွင့် မရှိပါသေးပါ။ Admin က /allow @username ဒါမှမဟုတ် /allow user_id နဲ့ ထည့်ပေးမှ သုံးလို့ရပါမယ်။"
+        )
+        return
+
     if _is_group_chat(update):
         if ALLOWED_GROUP_IDS and update.effective_chat.id not in ALLOWED_GROUP_IDS:
             return
@@ -1643,6 +1837,12 @@ async def ask_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
+    if not _is_allowed_user(user):
+        await update.message.reply_text(
+            "⛔ ဒီ bot ကို သုံးခွင့် မရှိပါသေးပါ။ Admin က /allow နဲ့ ထည့်ပေးမှ သုံးလို့ရပါမယ်။"
+        )
+        return
+
     if _is_group_chat(update):
         if ALLOWED_GROUP_IDS and update.effective_chat.id not in ALLOWED_GROUP_IDS:
             return
@@ -1663,6 +1863,11 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not prompt:
         await update.message.reply_text(
             "/search မေးခွန်း လို့ရိုက်ပြီး internet ကရှာပြီး မေးပါ။"
+        )
+        return
+    if not _is_allowed_user(user):
+        await update.message.reply_text(
+            "⛔ ဒီ bot ကို သုံးခွင့် မရှိပါသေးပါ။ Admin က /allow နဲ့ ထည့်ပေးမှ သုံးလို့ရပါမယ်။"
         )
         return
     if _is_group_chat(update):
@@ -1696,6 +1901,7 @@ def main() -> None:
     _require_env()
     _load_notes()
     _load_groups()
+    _load_allowed_users()
 
     application = (
         Application.builder()
@@ -1707,6 +1913,9 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("allow", allow_command))
+    application.add_handler(CommandHandler("disallow", disallow_command))
+    application.add_handler(CommandHandler("allowlist", allowlist_command))
     application.add_handler(CommandHandler("reset", reset))
     application.add_handler(CommandHandler("addnote", addnote))
     application.add_handler(CommandHandler("delnote", delnote))

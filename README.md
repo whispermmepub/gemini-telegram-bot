@@ -68,6 +68,7 @@ python main.py
 - `OLLAMA_MODEL` - default `llama3.1:8b`
 - `NOTES_DB_PATH` - default `notes_data.json`
 - `GROUPS_DB_PATH` - default `groups_data.json`
+- `ALLOWED_USERS_DB_PATH` - allow list DB path (default `allowed_users.json`)
 - `THAILAND_TIMEZONE` - default `Asia/Bangkok`
 - `ALLOWED_GROUP_IDS` - comma-separated group IDs (negative numbers) — ထည့်ထားရင် ဒီ group တွေပဲ bot သုံးလို့ရမယ် (empty = အကုန်ခွင့်)
 - `RATE_LIMIT_SECONDS` - user တစ်ယောက် ထပ်မေးဖို့ စောင့်ရမယ့် စက္ကန့်အရေအတွက် (default `5`)
@@ -212,3 +213,18 @@ Hugging Face Inference API ကို သုံးပြီး ကိုယ့်
    - `HF_MODEL` = `DavidAU/Qwen3.5-9B-Claude-4.6-HighIQ-THINKING-HERETIC-UNCENSORED`
    - `PROVIDER=hf` (ဒီ model တစ်ခုတည်းပဲ သုံးချင်ရင်) ဒါမှမဟုတ် `PROVIDER_ORDER` ထဲ `hf` ထည့်ထားရင် fallback chain အနေနဲ့လည်း ရတယ်။
 3. Cold start (ပထမဆုံး request) မှာ model ကို ဖွင့်နေလို့ 1-2 မိနစ် ကြာတတ်ပါတယ်။ Free tier မှာ rate limit ရှိပြီး သုံးသူများချိန်မှာ queue ရှိနိုင်ပါတယ်။
+
+
+## Allow list — /allow (admin only)
+
+Bot ကို ဘယ်သူတွေ သုံးခွင့်ရှိမယ်ဆိုတာ admin က `/allow` နဲ့ ထည့်ပေးရပါတယ်။
+လူတိုင်း သုံးခွင့် မရှိပါ — allow list ထဲ မပါသူက မေးလို့ မရပါဘူး။ Admin (ADMIN_IDS / ADMIN_USERNAMES) ကတော့ အမြဲ သုံးလို့ရပါတယ်။
+
+- `/allow @telegramusername` — username နဲ့ ထည့်
+- `/allow 123456789` — numeric user ID နဲ့ ထည့်
+- `/disallow @username` သို့မဟုတ် `/disallow 123456789` — သုံးခွင့် ရုပ်သိမ်း
+- `/allowlist` — သုံးခွင့်ရထားသူ list ကြည့်
+
+Username နဲ့ ထည့်ထားရင် အဲဒီ user က bot ကို ပထမဆုံး message ပို့လိုက်တာနဲ့ အလိုအလျောက် သိလို့ရပါတယ်
+(bot က username ကို numeric ID နဲ့ တွဲသိမ်းပေးပါတယ်)။ Allow list က `allowed_users.json` (Railway volume
+ရှိရင် volume ထဲ) မှာ သိမ်းပါတယ်။
