@@ -202,17 +202,20 @@ Admin-only commands:
 `GEMINI_MODEL` ကိုပြောင်းပြီး model ကိုလည်း လိုသလိုရွေးနိုင်ပါတယ်။
 
 
-## Hugging Face (hf) provider — Qwen3.5-9B
+## Hugging Face (hf) provider
 
-Hugging Face Inference API ကို သုံးပြီး ကိုယ့်စက်မှာ GPU မလိုဘဲ စာသား သီးသန့် Q&A သုံးနိုင်ပါတယ်။
-(hf.co မှာ serverless inference ဖွင့်ထားတဲ့ OpenAI-compatible model အကုန် သုံးလို့ရပါတယ်။)
+Hugging Face ရဲ့ OpenAI-compatible endpoint (`HF_BASE_URL`, default `https://router.huggingface.co/v1`)
+ကို သုံးပါတယ်။ `HF_API_KEY` (free token, [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)) ထည့်ပြီး
+`PROVIDER=hf` (ဒါမှမဟုတ် `PROVIDER_ORDER` ထဲ `hf`) ထားရင် router မှာ ရနိုင်တဲ့ model တွေ
+(ဥပမာ `Qwen/Qwen3.5-9B`) ကို သုံးလို့ရပါတယ်။
 
-1. [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) မှာ free token ယူပါ။
-2. Variables ထဲထည့်ပါ:
-   - `HF_API_KEY` = token
-   - `HF_MODEL` = `DavidAU/Qwen3.5-9B-Claude-4.6-HighIQ-THINKING-HERETIC-UNCENSORED`
-   - `PROVIDER=hf` (ဒီ model တစ်ခုတည်းပဲ သုံးချင်ရင်) ဒါမှမဟုတ် `PROVIDER_ORDER` ထဲ `hf` ထည့်ထားရင် fallback chain အနေနဲ့လည်း ရတယ်။
-3. Cold start (ပထမဆုံး request) မှာ model ကို ဖွင့်နေလို့ 1-2 မိနစ် ကြာတတ်ပါတယ်။ Free tier မှာ rate limit ရှိပြီး သုံးသူများချိန်မှာ queue ရှိနိုင်ပါတယ်။
+> ⚠️ `DavidAU/Qwen3.5-9B-Claude-4.6-HighIQ-THINKING-HERETIC-UNCENSORED` က
+> HF router/OpenRouter မှာ **မရှိပါ** — free serverless နဲ့ မရနိုင်တော့ပါ။
+> ဒီ model ကို သုံးချင်ရင် ကိုယ်ပိုင် compute လိုပါတယ်:
+> - **Ollama (free)**: GPU ရှိတဲ့ PC မှာ `ollama pull hf.co/mradermacher/...-GGUF:Q4_K_M`
+>   ပြီး `PROVIDER=ollama` + `OLLAMA_MODEL=...` သုံးပါ (Railway က PC ကို မမြင်ရင် tunnel လို)။
+> - **Cloud GPU (paid)**: RunPod/vast.ai မှာ vLLM နဲ့ ဒီ model ကို run ပြီး
+>   `PROVIDER=hf` + `HF_BASE_URL=<သင့် vLLM endpoint>/v1` + `HF_MODEL=<model id>` ထားပါ။
 
 
 ## Allow list — /allow (admin only)
@@ -228,3 +231,7 @@ Bot ကို ဘယ်သူတွေ သုံးခွင့်ရှိမ�
 Username နဲ့ ထည့်ထားရင် အဲဒီ user က bot ကို ပထမဆုံး message ပို့လိုက်တာနဲ့ အလိုအလျောက် သိလို့ရပါတယ်
 (bot က username ကို numeric ID နဲ့ တွဲသိမ်းပေးပါတယ်)။ Allow list က `allowed_users.json` (Railway volume
 ရှိရင် volume ထဲ) မှာ သိမ်းပါတယ်။
+
+> သတိ: တူညီတဲ့ Telegram bot token ကို service တစ်ခုတည်းမှာပဲ ထားပါ။
+> နှစ်ခုမှာ ထားရင် `409 Conflict` ဖြစ်ပြီး bot ကျတတ်ပါတယ် —
+> ဒီ repo မှာတော့ Conflict ကို crash မဖြစ်အောင် error handler ထည့်ထားပါတယ်။

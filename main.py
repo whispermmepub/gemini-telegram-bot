@@ -45,7 +45,7 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip(
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b").strip()
 HF_API_KEY = os.getenv("HF_API_KEY", "").strip()
 HF_MODEL = os.getenv("HF_MODEL", "DavidAU/Qwen3.5-9B-Claude-4.6-HighIQ-THINKING-HERETIC-UNCENSORED").strip()
-HF_BASE_URL = os.getenv("HF_BASE_URL", "https://api-inference.huggingface.co/v1").rstrip("/")
+HF_BASE_URL = os.getenv("HF_BASE_URL", "https://router.huggingface.co/v1").rstrip("/")
 HF_MAX_TOKENS = int(os.getenv("HF_MAX_TOKENS", "2048"))
 PROVIDER = os.getenv("PROVIDER", "auto").strip().lower()
 PROVIDER_ORDER = [
@@ -1879,6 +1879,18 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await _process_prompt(update, context, prompt, user)
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Keep the bot alive on transient polling errors (e.g. 409 Conflict when
+    another instance shares the same bot token) instead of crashing."""
+    exc = context.error
+    if exc is None:
+        return
+    if isinstance(exc, Conflict):
+        logger.warning("getUpdates 409 Conflict (another instance may be polling the same token): %s", exc)
+        return
+    logger.error("Unhandled error: %s", exc, exc_info=exc)
+
+
 async def post_init(application: Application) -> None:
     global BOT_USERNAME
     BOT_USERNAME = (application.bot.username or "").lstrip("@")
@@ -1910,6 +1922,7 @@ def main() -> None:
         .build()
     )
     application.bot_data["genai_client"] = _build_client()
+    application.add_error_handler(error_handler)
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
